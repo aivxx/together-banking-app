@@ -7,7 +7,30 @@ struct ImportView: View {
     @Environment(\.dismiss) var dismiss
     @State private var picker = false
     @State private var account = "Checking"
+    @State private var accountKind: StatementAccountKind = .checking
+    @State private var bankSelection = "new"
+    @State private var newBankID = UUID()
+    @State private var notes = ""
+    @State private var balanceDate = Date()
     @State private var selectedCardID: UUID?
+    private var bankAccounts: [(UUID, String)] {
+        accountKind == .checking ? (store.household.checkingAccounts ?? []).map { ($0.id, $0.name) } : (store.household.savingsAccounts ?? []).map { ($0.id, $0.name) }
+    }
+    private var bankID: UUID? { accountKind == .creditCard ? nil : UUID(uuidString: bankSelection) ?? newBankID }
+    private var suggestedBalance: Double? { accountKind == .creditCard ? draft?.suggestedBalance : draft?.endingBalance }
+    private func configureBalance() {
+        cardBalance = suggestedBalance ?? 0
+        updateBalance = suggestedBalance != nil && (accountKind != .creditCard || selectedCard != nil)
+    }
+    private var detectedAccountName: String? { draft?.detectedAccount?.name(for: accountKind) }
+    private func detectExistingAccount() {
+        guard accountKind != .creditCard, bankSelection == "new", let detected = draft?.detectedAccount else { return }
+        if let match = store.household.matchingBankAccount(identity: detected.identity(for: accountKind), kind: accountKind) {
+            bankSelection = match.uuidString
+            account = bankAccounts.first { $0.0 == match }?.1 ?? detected.name(for: accountKind)
+        } else { account = detected.name(for: accountKind) }
+        for index in entries.indices { entries[index].account = account }
+    }
     private var selectedCard: Card? { store.household.cards.first { $0.id == selectedCardID } }
     @State private var year = Calendar.current.component(.year, from: Date())
     @State private var draft: ImportDraft?
@@ -17,15 +40,44 @@ struct ImportView: View {
     @State private var reviewed = false
     @State private var updateBalance = false
     @State private var cardBalance = 0.0
-    private var canImport: Bool { reviewed && (!updateBalance || (cardBalance.isFinite && cardBalance >= 0)) && !entries.isEmpty && entries.allSatisfy { $0.amount.isFinite && !$0.merchant.isEmpty } }
+    private var canImport: Bool {
+        reviewed && !account.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        (!updateBalance || (cardBalance.isFinite && (accountKind == .checking || cardBalance >= 0))) &&
+        (accountKind == .creditCard || bankSelection != "new" || (updateBalance && detectedAccountName != nil)) &&
+        (!entries.isEmpty || updateBalance) && entries.allSatisfy { $0.amount.isFinite && !$0.merchant.isEmpty }
+    }
     var body: some View {
         NavigationStack {
             Form {
-                Section("Credit card") {
-                    Picker("Attach to card", selection: $selectedCardID) {
-                        Text("No credit card").tag(nil as UUID?)
-                        ForEach(store.household.cards) { card in Text(card.name + " · " + card.lastFour).tag(Optional(card.id)) }
+                Section("Account") {
+                    Picker("Statement type", selection: $accountKind) {
+                        ForEach(StatementAccountKind.allCases) { Text($0.rawValue).tag($0) }
                     }
+                    if accountKind == .creditCard {
+                        Picker("Attach to card", selection: $selectedCardID) {
+                            Text("No credit card").tag(nil as UUID?)
+                            ForEach(store.household.cards) { card in Text(card.name + " · " + card.lastFour).tag(Optional(card.id)) }
+                        }
+
+                    } else {
+                        Picker("Account", selection: $bankSelection) {
+                            Text("Add new account").tag("new")
+                            ForEach(bankAccounts, id: \.0) { item in Text(item.1).tag(item.0.uuidString) }
+                        }
+                        if bankSelection == "new" {
+                            Text("The account will be detected from your statement and added after you review and import it.")
+                                .font(.caption).foregroundStyle(theme.muted)
+                            if let name = detectedAccountName {
+                                Label(name, systemImage: "building.columns").font(.subheadline)
+                            } else if draft != nil {
+                                Text("We couldn’t identify the bank and account number. Select an existing account or try a statement that includes its account details.")
+                                    .font(.caption).foregroundStyle(.orange)
+                            }
+                        }
+                    }
+                }.disabled(busy)
+                Section("Statement notes") {
+                    TextField("Add a note about this statement", text: $notes, axis: .vertical).lineLimit(3...6)
                 }
                 if let draft {
                     Section {
@@ -50,20 +102,25 @@ struct ImportView: View {
                             }.padding(.vertical, 4)
                         }.onDelete { entries.remove(atOffsets: $0) }
                     }
-                    if selectedCard != nil {
+                    if accountKind != .creditCard || selectedCard != nil {
                         Section {
-                            Toggle("Update this card’s statement balance", isOn: $updateBalance)
-                            if updateBalance { TextField("Statement balance", value: $cardBalance, format: .number.precision(.fractionLength(2))).keyboardType(.decimalPad) }
-                        } footer: { Text("Confirm this balance against the statement. It replaces the saved balance for \(account).") }
+                            Toggle("Update account balance", isOn: $updateBalance)
+                            if updateBalance {
+                                TextField("Ending balance ($)", value: $cardBalance, format: .number.precision(.fractionLength(2))).keyboardType(.numbersAndPunctuation)
+                                DatePicker("Statement ending date", selection: $balanceDate, displayedComponents: .date)
+                            }
+                            if suggestedBalance == nil {
+                                Text("No ending balance detected. Enter the statement’s ending balance to update this account.").font(.caption).foregroundStyle(theme.muted)
+                            }
+                        } footer: { Text("Confirm the ending balance and date for \(account). Older bank statements won’t replace a newer balance. A new bank account needs an ending balance.") }
                     }
                     Section { Toggle("I checked these against my statement", isOn: $reviewed) }
-                    Section { Button("Import \(entries.count) transactions") { store.add(draft, entries: entries, cardBalance: updateBalance ? cardBalance : nil, account: account, cardID: selectedCardID); dismiss() }.disabled(!canImport) } footer: { Text("Matching transactions already saved for this account are linked to this statement without adding duplicates. The original document is saved with your household. You can also update balances and payment dates in Cards.") }
+                    Section { Button("Import statement · \(entries.count) transactions") { store.add(draft, entries: entries, cardBalance: updateBalance ? cardBalance : nil, account: account, cardID: accountKind == .creditCard ? selectedCardID : nil, accountKind: accountKind, bankAccountID: bankID, balanceDate: balanceDate, notes: notes); dismiss() }.disabled(!canImport) } footer: { Text("Matching transactions already saved for this account are linked to this statement without adding duplicates. The original document is saved with your household. You can also update balances and payment dates in Cards.") }
                 } else {
                     Section {
                         VStack(alignment: .leading, spacing: 12) { Image(systemName: "doc.text.viewfinder").font(.largeTitle).foregroundStyle(theme.accent); Text("Turn statements into clarity.").font(.title2.bold()); Text("PDF, scanned PDF, CSV, or text. Reading and category suggestions happen on this iPhone.").font(.subheadline).foregroundStyle(theme.muted) }.padding(.vertical, 12)
                     }
                     Section {
-                        TextField("Account or card nickname", text: $account)
                         Stepper("Statement year: \(String(year))", value: $year, in: 2000...2100)
                     } header: { Text("Statement details") } footer: { Text("The year is used for dates without a year. For statements spanning December and January, check each date during review.") }
                     Section { Button { picker = true } label: { HStack { Label(busy ? "Reading statement…" : "Choose a document", systemImage: "folder"); if busy { Spacer(); ProgressView() } } }.disabled(busy || account.trimmingCharacters(in: .whitespaces).isEmpty) }
@@ -71,10 +128,20 @@ struct ImportView: View {
                 }
             }.scrollContentBackground(.hidden).background(theme.canvas).navigationTitle(draft == nil ? "Upload statement" : "Review import").navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+                .onChange(of: accountKind) { _, kind in
+                    selectedCardID = nil; bankSelection = "new"; newBankID = UUID(); account = kind.rawValue
+                    configureBalance()
+                    detectExistingAccount()
+                }
+                .onChange(of: bankSelection) { _, selection in
+                    account = bankAccounts.first { $0.0.uuidString == selection }?.1 ?? detectedAccountName ?? accountKind.rawValue
+                }
                 .onChange(of: selectedCardID) { _, _ in
-                    account = selectedCard?.name ?? "Checking"
-                    for index in entries.indices { entries[index].account = account }
-                    updateBalance = selectedCard != nil && draft?.suggestedBalance != nil
+                    if let selectedCard { account = selectedCard.name }
+                    configureBalance()
+                }
+                .onChange(of: account) { _, value in
+                    for index in entries.indices { entries[index].account = value }
                 }
                 .fileImporter(isPresented: $picker, allowedContentTypes: [.pdf, .commaSeparatedText, .plainText]) { result in
                     switch result {
@@ -84,7 +151,10 @@ struct ImportView: View {
                         Task {
                             do {
                                 let parsed = try await Task.detached(priority: .userInitiated) { try StatementParser.parse(url: url, account: selectedAccount, year: selectedYear) }.value
-                                draft = parsed; entries = parsed.entries; cardBalance = parsed.suggestedBalance ?? 0; updateBalance = parsed.suggestedBalance != nil && selectedCard != nil
+                                draft = parsed; entries = parsed.entries
+                                balanceDate = parsed.statementDate ?? entries.map(\.date).max() ?? Date()
+                                configureBalance()
+                                detectExistingAccount()
                             } catch { self.error = error.localizedDescription }
                             busy = false
                         }

@@ -10,6 +10,7 @@ struct Entry: Identifiable, Codable, Hashable {
     var customCategory: String? = nil
     var sourceStatementIDs: [UUID]? = nil
     var cardID: UUID? = nil
+    var bankAccountID: UUID? = nil
     var recurringOverride: Bool? = nil
     // Keep the existing persisted expense-positive convention for sync compatibility.
     // All transaction displays and editors use the bank's money-in/money-out signs.
@@ -63,12 +64,21 @@ struct Card: Identifiable, Codable {
     var minimum: Double
     var modified = Date()
 }
+enum StatementAccountKind: String, Codable, CaseIterable, Identifiable {
+    case checking = "Checking", savings = "Savings", creditCard = "Credit card"
+    var id: String { rawValue }
+}
 struct Statement: Identifiable, Codable {
     var id = UUID()
     var name: String
     var imported = Date()
     var count: Int
     var data: Data
+    var notes: String? = nil
+    var accountKind: StatementAccountKind? = nil
+    var accountID: UUID? = nil
+    var endingBalance: Double? = nil
+    var balanceDate: Date? = nil
 }
 struct SavedCategory: Identifiable, Codable {
     var id = UUID()
@@ -88,6 +98,8 @@ struct SavingsAccount: Identifiable, Codable {
     var name: String
     var balance: Double
     var modified = Date()
+    var balanceDate: Date? = nil
+    var statementIdentity: String? = nil
     var isValid: Bool { !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && balance.isFinite && balance >= 0 }
 }
 struct CheckingAccount: Identifiable, Codable {
@@ -95,6 +107,8 @@ struct CheckingAccount: Identifiable, Codable {
     var name: String
     var balance: Double
     var modified = Date()
+    var balanceDate: Date? = nil
+    var statementIdentity: String? = nil
     var isValid: Bool { !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && balance.isFinite }
 }
 struct Household: Codable {
@@ -111,7 +125,11 @@ struct Household: Codable {
         var accounts = checkingAccounts ?? []
         for account in incoming {
             if let index = accounts.firstIndex(where: { $0.id == account.id }) {
-                if account.modified > accounts[index].modified { accounts[index] = account }
+                let current = accounts[index]
+                let useIncoming: Bool
+                if let date = account.balanceDate, let previous = current.balanceDate, date != previous { useIncoming = date > previous }
+                else { useIncoming = account.modified > current.modified }
+                if useIncoming { accounts[index] = account }
             } else { accounts.append(account) }
         }
         if !accounts.isEmpty { checkingAccounts = accounts }
@@ -121,22 +139,28 @@ struct Household: Codable {
         var accounts = savingsAccounts ?? []
         for account in incoming {
             if let index = accounts.firstIndex(where: { $0.id == account.id }) {
-                if account.modified > accounts[index].modified { accounts[index] = account }
+                let current = accounts[index]
+                let useIncoming: Bool
+                if let date = account.balanceDate, let previous = current.balanceDate, date != previous { useIncoming = date > previous }
+                else { useIncoming = account.modified > current.modified }
+                if useIncoming { accounts[index] = account }
             } else { accounts.append(account) }
         }
         if !accounts.isEmpty { savingsAccounts = accounts }
     }
-    mutating func importEntries(_ incoming: [Entry], statementID: UUID, cardID: UUID?) -> Int {
+    mutating func importEntries(_ incoming: [Entry], statementID: UUID, cardID: UUID?, bankAccountID: UUID? = nil) -> Int {
         for var entry in incoming {
             entry.cardID = cardID
+            entry.bankAccountID = bankAccountID
             if let index = entries.firstIndex(where: {
                 $0.date == entry.date && $0.merchant == entry.merchant && $0.amount == entry.amount &&
-                ($0.cardID != nil && entry.cardID != nil ? $0.cardID == entry.cardID : $0.account == entry.account)
+                ($0.bankAccountID != nil && entry.bankAccountID != nil ? $0.bankAccountID == entry.bankAccountID : ($0.cardID != nil && entry.cardID != nil ? $0.cardID == entry.cardID : $0.account == entry.account))
             }) {
                 var sources = entries[index].sourceStatementIDs ?? []
                 if !sources.contains(statementID) { sources.append(statementID) }
                 entries[index].sourceStatementIDs = sources
                 if entries[index].cardID == nil { entries[index].cardID = cardID }
+                if entries[index].bankAccountID == nil { entries[index].bankAccountID = bankAccountID }
                 entries[index].modified = Date()
             } else {
                 entry.sourceStatementIDs = [statementID]
@@ -144,6 +168,30 @@ struct Household: Codable {
             }
         }
         return entries.filter { ($0.sourceStatementIDs ?? []).contains(statementID) }.count
+    }
+    func matchingBankAccount(identity: String, kind: StatementAccountKind) -> UUID? {
+        let matches: [UUID]
+        if kind == .checking { matches = (checkingAccounts ?? []).filter { $0.statementIdentity == identity }.map(\.id) }
+        else if kind == .savings { matches = (savingsAccounts ?? []).filter { $0.statementIdentity == identity }.map(\.id) }
+        else { return nil }
+        return matches.count == 1 ? matches[0] : nil
+    }
+    mutating func applyStatementBalance(kind: StatementAccountKind, accountID: UUID, name: String, balance: Double, date: Date, identity: String? = nil) {
+        guard balance.isFinite else { return }
+        if kind == .checking {
+            if let existing = (checkingAccounts ?? []).first(where: { $0.id == accountID }), let previous = existing.balanceDate, date < previous { return }
+            var account = (checkingAccounts ?? []).first { $0.id == accountID } ?? CheckingAccount(id: accountID, name: name, balance: balance)
+            account.balance = balance; account.balanceDate = date; account.modified = Date()
+            if account.statementIdentity == nil { account.statementIdentity = identity }
+            mergeChecking([account])
+        } else if kind == .savings {
+            guard balance >= 0 else { return }
+            if let existing = (savingsAccounts ?? []).first(where: { $0.id == accountID }), let previous = existing.balanceDate, date < previous { return }
+            var account = (savingsAccounts ?? []).first { $0.id == accountID } ?? SavingsAccount(id: accountID, name: name, balance: balance)
+            account.balance = balance; account.balanceDate = date; account.modified = Date()
+            if account.statementIdentity == nil { account.statementIdentity = identity }
+            mergeSavings([account])
+        }
     }
     static func categoryKey(_ name: String) -> String {
         name.trimmingCharacters(in: .whitespacesAndNewlines).folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
@@ -222,4 +270,51 @@ struct SpendingMonth {
     var moneyReceived: Double { entries.filter { $0.amount < 0 }.reduce(0) { $0 - $1.amount } }
     var dayCount: Int { calendar.range(of: .day, in: .month, for: date)!.count }
     func moved(by months: Int) -> Date { calendar.date(byAdding: .month, value: months, to: date)! }
+}
+
+// A structured task group would wait for an unresponsive CloudKit child even
+// after its timer wins. This gate returns on time and ignores late completions.
+@MainActor private final class CloudDeadlineGate<Value> {
+    var continuation: CheckedContinuation<Value, Error>?
+    var work: Task<Void, Never>?
+    var timer: Task<Void, Never>?
+    func finish(_ result: Result<Value, Error>) {
+        guard let continuation else { return }
+        self.continuation = nil
+        work?.cancel(); timer?.cancel()
+        work = nil; timer = nil
+        continuation.resume(with: result)
+    }
+}
+enum CloudTimeout: LocalizedError {
+    case expired
+    var errorDescription: String? { "iCloud didn’t finish in time. Your saved data is still on this device. Check your connection and try Sync household again." }
+}
+@MainActor func withCloudDeadline<Value>(seconds: Double, operation: @escaping @MainActor () async throws -> Value) async throws -> Value {
+    try Task.checkCancellation()
+    let gate = CloudDeadlineGate<Value>()
+    return try await withTaskCancellationHandler(operation: {
+        try await withCheckedThrowingContinuation { continuation in
+            gate.continuation = continuation
+            gate.work = Task { @MainActor in
+                do { gate.finish(.success(try await operation())) }
+                catch { gate.finish(.failure(error)) }
+            }
+            gate.timer = Task { @MainActor in
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                    gate.finish(.failure(CloudTimeout.expired))
+                } catch { }
+            }
+        }
+    }, onCancel: { Task { @MainActor in gate.finish(.failure(CancellationError())) } })
+}
+enum CloudPayload {
+    static func equivalent(_ lhs: Data, _ rhs: Data) -> Bool {
+        guard let left = try? JSONSerialization.jsonObject(with: lhs),
+              let right = try? JSONSerialization.jsonObject(with: rhs),
+              let a = try? JSONSerialization.data(withJSONObject: left, options: [.sortedKeys]),
+              let b = try? JSONSerialization.data(withJSONObject: right, options: [.sortedKeys]) else { return lhs == rhs }
+        return a == b
+    }
 }

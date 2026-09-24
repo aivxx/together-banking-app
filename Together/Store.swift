@@ -39,9 +39,25 @@ import CloudKit
             if ok { unlocked = true; if enable { lockEnabled = true; UserDefaults.standard.set(true, forKey: "lockEnabled") } }
         } catch { self.error = error.localizedDescription }
     }
-    func add(_ draft: ImportDraft, entries: [Entry], cardBalance: Double? = nil, account: String = "", cardID: UUID? = nil) {
+    func add(_ draft: ImportDraft, entries: [Entry], cardBalance: Double? = nil, account: String = "", cardID: UUID? = nil, accountKind: StatementAccountKind = .creditCard, bankAccountID: UUID? = nil, balanceDate: Date = Date(), notes: String = "") {
         var statement = Statement(name: draft.name, count: 0, data: draft.data)
-        statement.count = household.importEntries(entries, statementID: statement.id, cardID: cardID)
+        statement.notes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        statement.accountKind = accountKind
+        statement.accountID = accountKind == .creditCard ? cardID : bankAccountID
+        statement.endingBalance = cardBalance; statement.balanceDate = balanceDate
+        statement.count = household.importEntries(entries, statementID: statement.id, cardID: cardID, bankAccountID: bankAccountID)
+        if accountKind != .creditCard, let id = bankAccountID, let balance = cardBalance {
+            household.applyStatementBalance(kind: accountKind, accountID: id, name: account, balance: balance, date: balanceDate, identity: draft.detectedAccount?.identity(for: accountKind))
+        }
+        if let id = bankAccountID, let identity = draft.detectedAccount?.identity(for: accountKind) {
+            if accountKind == .checking, let index = household.checkingAccounts?.firstIndex(where: { $0.id == id }), household.checkingAccounts?[index].statementIdentity == nil {
+                household.checkingAccounts?[index].statementIdentity = identity
+                household.checkingAccounts?[index].modified = Date()
+            } else if accountKind == .savings, let index = household.savingsAccounts?.firstIndex(where: { $0.id == id }), household.savingsAccounts?[index].statementIdentity == nil {
+                household.savingsAccounts?[index].statementIdentity = identity
+                household.savingsAccounts?[index].modified = Date()
+            }
+        }
         household.statements.append(statement)
         if let balance = cardBalance, let index = household.cards.firstIndex(where: { $0.id == cardID }) {
             household.cards[index].balance = balance
@@ -54,11 +70,8 @@ import CloudKit
         save()
         return category
     }
-    func sync() async {
-        guard let cloud, !syncing else { return }
-        syncing = true; defer { syncing = false }
-        do {
-            var synced = try await cloud.sync(household)
+    private func applyDownloaded(_ downloaded: Household) {
+        var synced = downloaded
             // Preserve edits or imports made while network requests were in flight.
             for entry in household.entries {
                 if let i = synced.entries.firstIndex(where: { $0.id == entry.id }) { if entry.modified > synced.entries[i].modified { synced.entries[i] = entry } }
@@ -72,9 +85,28 @@ import CloudKit
             synced.mergeCategories(household.savedCategories ?? [])
             synced.mergeSavings(household.savingsAccounts ?? [])
             synced.mergeChecking(household.checkingAccounts ?? [])
-            household = synced; save(); cloudStatus = "Synced just now"
+        household = synced; save()
+    }
+    func sync() async {
+        guard let cloud, !syncing, !preparingInvitation else { return }
+        syncing = true; cloudStatus = "Connecting to iCloud…"
+        defer { syncing = false }
+        do {
+            let synced = try await withCloudDeadline(seconds: 120) {
+                try await cloud.sync(self.household, progress: { status in
+                    if !Task.isCancelled { self.cloudStatus = status }
+                }, didDownload: { downloaded in
+                    if !Task.isCancelled { self.applyDownloaded(downloaded) }
+                })
+            }
+            applyDownloaded(synced)
+            cloudStatus = "Synced just now"
+        } catch is CancellationError { cloudStatus = "Sync interrupted. Try again." }
+        catch {
+            let stage = cloudStatus
+            self.error = stage + "\n" + error.localizedDescription
+            cloudStatus = "Sync needs attention"
         }
-        catch { self.error = error.localizedDescription; cloudStatus = "Sync needs attention" }
     }
     func refreshFamilyMembers() async {
         guard !loadingFamily else { return }
@@ -82,7 +114,7 @@ import CloudKit
         loadingFamily = true; familyError = nil
         defer { loadingFamily = false }
         do {
-            familyMembers = try await cloud.members()
+            familyMembers = try await withCloudDeadline(seconds: 45) { try await cloud.members() }
             familyLoaded = true
         } catch {
             familyLoaded = false
@@ -97,13 +129,13 @@ import CloudKit
         defer { preparingInvitation = false }
         do {
             // Establish the private share first. Never upload local records if preparation fails.
-            sharing = try await cloud.makeShare()
+            sharing = try await withCloudDeadline(seconds: 60) { try await cloud.makeShare() }
         } catch { self.error = error.localizedDescription }
     }
     func accept(_ metadata: CKShare.Metadata) async {
         guard let cloud else { error = "Enable CloudKit in the signed app to accept this invitation."; return }
         do {
-            try await cloud.accept(metadata)
+            try await withCloudDeadline(seconds: 60) { try await cloud.accept(metadata) }
             await sync()
         } catch { self.error = error.localizedDescription }
     }
@@ -119,20 +151,28 @@ import CloudKit
     var rootID: CKRecord.ID { CKRecord.ID(recordName: "household", zoneID: zoneID) }
     func prepare() async throws {
         guard try await container.accountStatus() == .available else { throw CloudError.account }
+        try Task.checkCancellation()
         if !participant { _ = try await database.save(CKRecordZone(zoneID: zoneID)) }
+        try Task.checkCancellation()
         do { _ = try await database.record(for: rootID) }
         catch let error as CKError where error.code == .unknownItem {
+            try Task.checkCancellation()
             guard !participant else { throw error }
             let root = CKRecord(recordType: "Household", recordID: rootID); root["title"] = "Our household"; _ = try await database.save(root)
         }
     }
-    func sync(_ local: Household) async throws -> Household {
+    func sync(_ local: Household, progress: (String) -> Void = { _ in }, didDownload: (Household) -> Void = { _ in }) async throws -> Household {
         try await prepare()
+        try Task.checkCancellation()
+        progress("Downloading household…")
         // Zone changes avoid query indexes and fetch every page. UUID records merge independent edits.
         var records: [CKRecord] = []; var token: CKServerChangeToken?
         var more = true
         while more {
+            try Task.checkCancellation()
             let result = try await database.recordZoneChanges(inZoneWith: zoneID, since: token)
+            try Task.checkCancellation()
+            progress("Downloaded \(records.count + result.modificationResultsByID.count) records…")
             for modification in result.modificationResultsByID.values { records.append(try modification.get().record) }
             token = result.changeToken; more = result.moreComing
         }
@@ -158,7 +198,10 @@ import CloudKit
                 if !merged.statements.contains(where: { $0.id == remote.id }) { merged.statements.append(remote) }
             }
         }
+        try Task.checkCancellation()
+        didDownload(merged)
         let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
         var items: [(UUID, String, Data)] = []
         for account in merged.checkingAccounts ?? [] { items.append((account.id, "checking", try encoder.encode(account))) }
         for account in merged.savingsAccounts ?? [] { items.append((account.id, "savings", try encoder.encode(account))) }
@@ -166,24 +209,87 @@ import CloudKit
         for entry in merged.entries { items.append((entry.id, "entry", try encoder.encode(entry))) }
         for card in merged.cards { items.append((card.id, "card", try encoder.encode(card))) }
         for statement in merged.statements { items.append((statement.id, "statement", try encoder.encode(statement))) }
-        for (id, kind, data) in items {
-            let recordID = CKRecord.ID(recordName: id.uuidString, zoneID: zoneID)
-            let existing = records.first(where: { $0.recordID == recordID })
-            if let asset = existing?["payload"] as? CKAsset, let url = asset.fileURL, (try? Data(contentsOf: url)) == data { continue }
-            let record = existing ?? CKRecord(recordType: "HouseholdItem", recordID: recordID)
-            record.parent = CKRecord.Reference(recordID: rootID, action: .none)
-            record["kind"] = kind
-            let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-            try data.write(to: url, options: [.atomic, .completeFileProtection])
-            defer { try? FileManager.default.removeItem(at: url) }
-            record["payload"] = CKAsset(fileURL: url)
-            // Server change tags reject concurrent overwrites; a subsequent sync merges newer records.
-            _ = try await database.save(record)
+        let existingByID = Dictionary(records.map { ($0.recordID, $0) }, uniquingKeysWith: { _, newer in newer })
+        let changed = items.filter { id, _, data in
+            let existing = existingByID[CKRecord.ID(recordName: id.uuidString, zoneID: zoneID)]
+            guard let asset = existing?["payload"] as? CKAsset, let url = asset.fileURL,
+                  let remote = try? Data(contentsOf: url) else { return true }
+            return !CloudPayload.equivalent(remote, data)
+        }
+        var offset = 0
+        while offset < changed.count {
+            try Task.checkCancellation()
+            // Bound record count and asset bytes per request; large statements go alone.
+            var end = offset; var bytes = 0
+            while end < changed.count && end - offset < 40 {
+                let size = changed[end].2.count
+                if end > offset && bytes + size > 8_000_000 { break }
+                bytes += size; end += 1
+            }
+            progress("Uploading \(offset + 1)–\(end) of \(changed.count) records…")
+            var batch: [CKRecord] = []; var files: [URL] = []
+            defer { for file in files { try? FileManager.default.removeItem(at: file) } }
+            for (id, kind, data) in changed[offset..<end] {
+                let recordID = CKRecord.ID(recordName: id.uuidString, zoneID: zoneID)
+                let record = existingByID[recordID] ?? CKRecord(recordType: "HouseholdItem", recordID: recordID)
+                record.parent = CKRecord.Reference(recordID: rootID, action: .none)
+                record["kind"] = kind
+                let url = try stageUpload(data)
+                files.append(url)
+                record["payload"] = CKAsset(fileURL: url)
+                batch.append(record)
+            }
+            try await saveBatch(batch)
+            try Task.checkCancellation()
+            offset = end
         }
         return merged
     }
+    private func stageUpload(_ data: Data) throws -> URL {
+        let manager = FileManager.default
+        var directory = try manager.url(for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+            .appendingPathComponent("CloudUploads", isDirectory: true)
+        try manager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [
+            .protectionKey: FileProtectionType.completeUntilFirstUserAuthentication,
+            .posixPermissions: 0o700
+        ])
+        // CloudKit may read the staged asset after the screen locks. These short-lived
+        // files stay encrypted and unavailable before the first device unlock.
+        try manager.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: directory.path)
+        var values = URLResourceValues(); values.isExcludedFromBackup = true
+        try directory.setResourceValues(values)
+        let url = directory.appendingPathComponent(UUID().uuidString + ".json")
+        do {
+            try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            return url
+        } catch {
+            try? manager.removeItem(at: url)
+            throw NSError(domain: "TogetherSync", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Could not prepare the iCloud upload on this device. " + error.localizedDescription,
+                NSUnderlyingErrorKey: error
+            ])
+        }
+    }
+    private func saveBatch(_ records: [CKRecord]) async throws {
+        let operation = CKModifyRecordsOperation(recordsToSave: records, recordIDsToDelete: nil)
+        operation.savePolicy = .ifServerRecordUnchanged
+        operation.isAtomic = false
+        let configuration = CKOperation.Configuration()
+        configuration.qualityOfService = .userInitiated
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 60
+        operation.configuration = configuration
+        try await withTaskCancellationHandler(operation: {
+            try Task.checkCancellation()
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                operation.modifyRecordsResultBlock = { continuation.resume(with: $0) }
+                database.add(operation)
+            }
+        }, onCancel: { operation.cancel() })
+    }
     func makeShare() async throws -> CKShare {
         try await prepare()
+        try Task.checkCancellation()
         let root = try await database.record(for: rootID)
         if let reference = root.share { return try await database.record(for: reference.recordID) as! CKShare }
         guard !participant else { throw CloudError.owner }
@@ -196,6 +302,7 @@ import CloudKit
     }
     func accept(_ metadata: CKShare.Metadata) async throws {
         _ = try await container.accept(metadata)
+        try Task.checkCancellation()
         UserDefaults.standard.set(metadata.share.recordID.zoneID.ownerName, forKey: "shareOwner")
         UserDefaults.standard.set(metadata.share.recordID.zoneID.zoneName, forKey: "shareZone")
     }
@@ -213,7 +320,10 @@ extension Store {
         let result: String
         if let cloud {
             do {
-                try await cloud.verifyRoundTrip()
+                try cloud.verifyUploadStaging()
+                try FileManager.default.createDirectory(at: resultURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try Data("PASS: protected upload staging write/read/cleanup. CloudKit round-trip pending.".utf8).write(to: resultURL, options: [.atomic, .completeFileProtection])
+                try await withCloudDeadline(seconds: 120) { try await cloud.verifyRoundTrip() }
                 if ProcessInfo.processInfo.arguments.contains("--verify-family-sharing") {
                     let share = try await cloud.makeShare()
                     guard share.publicPermission == .none else {
@@ -240,6 +350,14 @@ extension Store {
     }
 }
 extension CloudService {
+    func verifyUploadStaging() throws {
+        let data = Data("Synthetic upload staging check".utf8)
+        let url = try stageUpload(data)
+        defer { try? FileManager.default.removeItem(at: url) }
+        guard try Data(contentsOf: url) == data else {
+            throw NSError(domain: "TogetherSetup", code: 4, userInfo: [NSLocalizedDescriptionKey: "Upload staging could not be read back."])
+        }
+    }
     func verifyRoundTrip() async throws {
         try await prepare()
         let id = CKRecord.ID(recordName: "setup-check-" + UUID().uuidString, zoneID: zoneID)
@@ -248,11 +366,10 @@ extension CloudService {
         record["kind"] = "entry"
         let entry = Entry(date: Date(), merchant: "Temporary CloudKit setup check", amount: 0, category: .other, account: "Setup check")
         let data = try JSONEncoder().encode(entry)
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try data.write(to: url, options: [.atomic, .completeFileProtection])
+        let url = try stageUpload(data)
         defer { try? FileManager.default.removeItem(at: url) }
         record["payload"] = CKAsset(fileURL: url)
-        _ = try await database.save(record)
+        try await saveBatch([record])
         do {
             let fetched = try await database.record(for: id)
             guard let asset = fetched["payload"] as? CKAsset, let file = asset.fileURL,

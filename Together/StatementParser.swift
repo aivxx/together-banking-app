@@ -12,6 +12,15 @@ struct ImportDraft {
     var skipped: Int
     var suggestedBalance: Double? = nil
     var unrecognizedTransactions: Int = 0
+    var endingBalance: Double? = nil
+    var statementDate: Date? = nil
+    var detectedAccount: DetectedStatementAccount? = nil
+}
+struct DetectedStatementAccount {
+    let institution: String
+    let lastFour: String
+    func name(for kind: StatementAccountKind) -> String { institution + " " + kind.rawValue + " · " + lastFour }
+    func identity(for kind: StatementAccountKind) -> String { institution.lowercased() + "|" + kind.rawValue + "|" + lastFour }
 }
 enum ImportError: LocalizedError {
     case unreadable, empty, tooLarge
@@ -31,11 +40,13 @@ enum StatementParser {
         let data = try Data(contentsOf: url)
         guard data.count <= 15_000_000 else { throw ImportError.tooLarge }
         var text = ""
+        var metadataText = ""
         if url.pathExtension.lowercased() == "pdf" {
             guard let pdf = PDFDocument(data: data), !pdf.isLocked else { throw ImportError.unreadable }
             for index in 0..<min(pdf.pageCount, 50) {
                 guard let page = pdf.page(at: index) else { continue }
                 let extracted = page.string ?? ""
+                metadataText += extracted + "\n"
                 // PDF text order can be column-first even when its text layer is readable.
                 // OCR provides positions so dates, descriptions and amounts stay on one row.
                 let image = page.thumbnail(of: CGSize(width: 2200, height: 3000), for: .mediaBox)
@@ -60,6 +71,7 @@ enum StatementParser {
                                                     height: Double(box.boundingBox.height), width: Double(box.boundingBox.width))
                             }
                         }
+                        metadataText += fragments.sorted { $0.y < $1.y }.map(\.text).joined(separator: " ") + "\n"
                         positioned = reconstructedRows(fragments).joined(separator: "\n")
                     } catch {
                         if extracted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { throw error }
@@ -71,9 +83,10 @@ enum StatementParser {
 
             }
         } else { guard let string = String(data: data, encoding: .utf8) else { throw ImportError.unreadable }; text = string }
+        metadataText += "\n" + text
         let parsed = parseText(text, account: account, year: year)
-        guard !parsed.0.isEmpty else { throw ImportError.empty }
-        return ImportDraft(entries: parsed.0, name: url.lastPathComponent, data: data, skipped: parsed.1, suggestedBalance: statementBalance(text), unrecognizedTransactions: text.components(separatedBy: "UNRECOGNIZED_TRANSACTION").count - 1)
+        guard !parsed.0.isEmpty || endingBalance(metadataText) != nil else { throw ImportError.empty }
+        return ImportDraft(entries: parsed.0, name: url.lastPathComponent, data: data, skipped: parsed.1, suggestedBalance: statementBalance(metadataText), unrecognizedTransactions: text.components(separatedBy: "UNRECOGNIZED_TRANSACTION").count - 1, endingBalance: endingBalance(metadataText), statementDate: statementDate(metadataText, year: year), detectedAccount: detectAccount(metadataText))
     }
     #endif
     struct TextFragment {
@@ -282,6 +295,36 @@ enum StatementParser {
     static func isBalanceSummary(_ line: String) -> Bool {
         line.range(of: #"^(?:(?:\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}(?:/\d{2,4})?)\s+)?(?:(?:beginning|ending|opening|closing|previous|new|statement|total|available|daily|running)\s+balance|balance\s+(?:forward|brought|carried))(?:\s*:?\s*[-+$\d(]|\s*$)"#,
                    options: .regularExpression.union(.caseInsensitive)) != nil
+    }
+    static func detectAccount(_ text: String) -> DetectedStatementAccount? {
+        // Inspect the statement header, not bank names/numbers inside transfers.
+        let boundary = text.range(of: #"account\s+activity|transaction\s+(?:details|history)|date\s+description"#, options: [.regularExpression, .caseInsensitive])
+        let header = String(text[..<(boundary?.lowerBound ?? text.endIndex)].prefix(2500))
+        let issuers = ["American Express", "Bank of America", "Wells Fargo", "Capital One", "Chase", "Citibank", "Discover", "Ally Bank", "SoFi", "US Bank", "U.S. Bank", "PNC", "TD Bank", "Navy Federal"]
+        let matches = issuers.compactMap { name -> (String, String.Index)? in
+            header.range(of: name, options: .caseInsensitive).map { (name, $0.lowerBound) }
+        }.sorted { $0.1 < $1.1 }
+        guard let issuer = matches.first?.0 else { return nil }
+        let regex = try! NSRegularExpression(pattern: #"(?i)\baccount\s*(?:ending(?:\s+in)?|number|no\.?|#)\s*[:#]?\s*([*xX•\d][*xX•\d \-]{3,35})(?!\d)"#)
+        guard let match = regex.firstMatch(in: header, range: NSRange(header.startIndex..., in: header)),
+              let range = Range(match.range(at: 1), in: header) else { return nil }
+        let digits = header[range].filter(\.isNumber)
+        guard digits.count >= 4 else { return nil }
+        return DetectedStatementAccount(institution: issuer, lastFour: String(digits.suffix(4)))
+    }
+    static func endingBalance(_ text: String) -> Double? {
+        let pattern = #"(?i)\b(?:ending|closing)\s+balance\s*:?\s*([-+]?\$?\s*[\d,]+\.\d{2}|\(\$?[\d,]+\.\d{2}\))"#
+        let regex = try! NSRegularExpression(pattern: pattern)
+        guard let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+              let range = Range(match.range(at: 1), in: text) else { return nil }
+        return amount(String(text[range]))
+    }
+    static func statementDate(_ text: String, year: Int) -> Date? {
+        let pattern = #"(?i)(?:statement date|period ending|closing date)\s*:?\s*(\d{1,2}/\d{1,2}/\d{2,4}|\d{4}-\d{2}-\d{2})"#
+        let regex = try! NSRegularExpression(pattern: pattern)
+        guard let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+              let range = Range(match.range(at: 1), in: text) else { return nil }
+        return date(String(text[range]), year: year)
     }
     static func statementBalance(_ text: String) -> Double? {
         let pattern = #"(?im)(?:new balance|statement balance|total balance)\s*:?\s*\$?([\d,]+\.\d{2})"#

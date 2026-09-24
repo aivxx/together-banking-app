@@ -257,6 +257,10 @@ struct EntryRow: View {
                 Text(entry.categoryName + " · " + entry.date.formatted(.dateTime.month(.abbreviated).day())).font(.caption2).foregroundStyle(theme.muted)
                 if let card = store.household.cards.first(where: { $0.id == entry.cardID }) {
                     Label(card.name + " · " + card.lastFour, systemImage: "creditcard").font(.caption2).foregroundStyle(theme.muted)
+                } else if let account = store.household.checkingAccounts?.first(where: { $0.id == entry.bankAccountID }) {
+                    Label(account.name, systemImage: "building.columns").font(.caption2).foregroundStyle(theme.muted)
+                } else if let account = store.household.savingsAccounts?.first(where: { $0.id == entry.bankAccountID }) {
+                    Label(account.name, systemImage: "banknote").font(.caption2).foregroundStyle(theme.muted)
                 } else { Text(entry.account).font(.caption2).foregroundStyle(theme.muted) }
                 if let statement = store.household.statements.first(where: { (entry.sourceStatementIDs ?? []).contains($0.id) }) {
                     Label(statement.name, systemImage: "doc.text").font(.caption2).foregroundStyle(theme.muted).lineLimit(1)
@@ -278,7 +282,7 @@ struct ActivityView: View {
     var filtered: [Entry] {
         store.household.entries.filter { entry in
             let matchesStatement = statementFilter == "all" || (statementFilter == "unlinked" ? (entry.sourceStatementIDs ?? []).isEmpty : (entry.sourceStatementIDs ?? []).contains(where: { $0.uuidString == statementFilter }))
-            let matchesCard = cardFilter == "all" || (cardFilter == "unlinked" ? entry.cardID == nil : entry.cardID?.uuidString == cardFilter)
+            let matchesCard = cardFilter == "all" || (cardFilter == "unlinked" ? entry.cardID == nil : (entry.cardID?.uuidString == cardFilter || entry.bankAccountID?.uuidString == cardFilter))
             return matchesStatement && matchesCard && (search.isEmpty || entry.merchant.localizedCaseInsensitiveContains(search) || entry.categoryName.localizedCaseInsensitiveContains(search) || entry.category.rawValue.localizedCaseInsensitiveContains(search)) && (filter == "All" || (filter == "Recurring" && recurring.contains(entry.id)) || (filter == "To review" && Insights.unusual(entry, in: store.household.entries)))
         }.sorted { $0.date > $1.date }
     }
@@ -303,9 +307,11 @@ struct ActivityView: View {
                         Text("All cards and accounts").tag("all")
                         Text("No credit card").tag("unlinked")
                         ForEach(store.household.cards) { card in Text(card.name + " · " + card.lastFour).tag(card.id.uuidString) }
+                        ForEach(store.household.checkingAccounts ?? []) { account in Text("Checking · " + account.name).tag(account.id.uuidString) }
+                        ForEach(store.household.savingsAccounts ?? []) { account in Text("Savings · " + account.name).tag(account.id.uuidString) }
                     }.pickerStyle(.inline)
                 } label: {
-                    filterLabel(cardFilter == "all" ? "All cards and accounts" : cardFilter == "unlinked" ? "No credit card" : store.household.cards.first { $0.id.uuidString == cardFilter }.map { $0.name + " · " + $0.lastFour } ?? "Credit card", icon: "creditcard")
+                    filterLabel(cardFilter == "all" ? "All cards and accounts" : cardFilter == "unlinked" ? "No credit card" : store.household.cards.first { $0.id.uuidString == cardFilter }.map { $0.name + " · " + $0.lastFour } ?? store.household.checkingAccounts?.first { $0.id.uuidString == cardFilter }?.name ?? store.household.savingsAccounts?.first { $0.id.uuidString == cardFilter }?.name ?? "Account", icon: "creditcard")
                 }.accessibilityLabel("Filter by credit card")
                 if statementFilter != "all" || cardFilter != "all" {
                     Button("Clear statement and card filters") { statementFilter = "all"; cardFilter = "all" }
@@ -342,7 +348,7 @@ struct EntryEditor: View {
                     Text("No credit card").tag(nil as UUID?)
                     ForEach(store.household.cards) { card in Text(card.name + " · " + card.lastFour).tag(Optional(card.id)) }
                 }.onChange(of: entry.cardID) { _, id in
-                    if let card = store.household.cards.first(where: { $0.id == id }) { entry.account = card.name }
+                    if let card = store.household.cards.first(where: { $0.id == id }) { entry.account = card.name; entry.bankAccountID = nil }
                 }
             }
             Section("Source statements") {
@@ -463,7 +469,19 @@ struct DocumentView: View {
     @Environment(\.appTheme) private var theme
     let statement: Statement
     var body: some View {
-        Group { if statement.name.lowercased().hasSuffix(".pdf") { PDFPreview(data: statement.data) } else { ScrollView { Text(String(data: statement.data, encoding: .utf8) ?? "Document unavailable").font(.system(.caption, design: .monospaced)).textSelection(.enabled).padding() } } }.navigationTitle(statement.name).navigationBarTitleDisplayMode(.inline)
+        VStack(alignment: .leading, spacing: 12) {
+            if let kind = statement.accountKind {
+                Text(kind.rawValue + (statement.balanceDate.map { " · " + $0.formatted(date: .abbreviated, time: .omitted) } ?? ""))
+                    .font(.caption).foregroundStyle(theme.muted).padding(.horizontal)
+            }
+            if let notes = statement.notes, !notes.isEmpty {
+                DisclosureGroup("Statement notes") { Text(notes).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) }.padding(.horizontal)
+            }
+            Group {
+                if statement.name.lowercased().hasSuffix(".pdf") { PDFPreview(data: statement.data) }
+                else { ScrollView { Text(String(data: statement.data, encoding: .utf8) ?? "Document unavailable").font(.system(.caption, design: .monospaced)).textSelection(.enabled).padding() } }
+            }.frame(maxWidth: .infinity, maxHeight: .infinity)
+        }.navigationTitle(statement.name).navigationBarTitleDisplayMode(.inline)
     }
 }
 struct PDFPreview: UIViewRepresentable {
@@ -733,65 +751,27 @@ struct MonthlyActivityView: View {
 struct SavingsView: View {
     @EnvironmentObject var store: Store
     @Environment(\.appTheme) private var theme
-    @State private var adding = false
     var body: some View {
         Page {
             VStack(alignment: .leading, spacing: 8) {
                 Text("TOTAL SAVED").font(.caption).foregroundStyle(theme.muted)
                 Text(store.household.totalSavings.money).font(.system(size: 40, weight: .medium, design: .rounded))
-                Text("Update these balances from your savings accounts.").font(.caption).foregroundStyle(theme.muted)
             }
             ForEach(store.household.savingsAccounts ?? []) { account in
-                NavigationLink { SavingsEditor(account: account) } label: {
-                    HStack {
-                        Image(systemName: "banknote").foregroundStyle(theme.accent)
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text(account.name).font(.headline)
-                            Text("Updated " + account.modified.formatted(date: .abbreviated, time: .omitted)).font(.caption).foregroundStyle(theme.muted)
-                        }
-                        Spacer()
-                        Text(account.balance.money).monospacedDigit()
-                        Image(systemName: "chevron.right")
-                    }.panel()
-                }.buttonStyle(.plain)
+                BankAccountBalanceRow(name: account.name, balance: account.balance, date: account.balanceDate ?? account.modified)
             }
-            if (store.household.savingsAccounts ?? []).isEmpty { Text("Add your first savings account to track your household’s savings.").foregroundStyle(theme.muted) }
-            Button { adding = true } label: { Label("Add savings account", systemImage: "plus.circle") }.buttonStyle(PrimaryButton())
-            Text("Balances are entered manually and shared through household sync.").font(.caption).foregroundStyle(theme.muted)
+            if (store.household.savingsAccounts ?? []).isEmpty {
+                Text("Upload a savings statement to add an account and see its balance here.").foregroundStyle(theme.muted)
+            }
+            Text("Balances update from imported statements and are shared through household sync.").font(.caption).foregroundStyle(theme.muted)
         }.navigationTitle("Savings")
             .refreshable { await store.sync() }
-            .sheet(isPresented: $adding) { NavigationStack { SavingsEditor(account: SavingsAccount(name: "", balance: 0)) } }
     }
 }
-struct SavingsEditor: View {
-    @EnvironmentObject var store: Store
-    @Environment(\.appTheme) private var theme
-    @Environment(\.dismiss) private var dismiss
-    @State var account: SavingsAccount
-    var body: some View {
-        Form {
-            Section("Savings account") {
-                TextField("Account nickname", text: $account.name)
-                TextField("Balance ($)", value: $account.balance, format: .number.precision(.fractionLength(2))).keyboardType(.decimalPad)
-            }
-            Button("Save account") {
-                account.name = account.name.trimmingCharacters(in: .whitespacesAndNewlines)
-                account.modified = Date()
-                store.household.mergeSavings([account]); store.save()
-                dismiss()
-                Task { await store.sync() }
-            }.disabled(!account.isValid)
-        }.scrollContentBackground(.hidden).background(theme.canvas)
-            .navigationTitle("Savings account").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
-    }
-}
-
 
 struct CheckingView: View {
     @EnvironmentObject var store: Store
     @Environment(\.appTheme) private var theme
-    @State private var adding = false
     var body: some View {
         Page {
             VStack(alignment: .leading, spacing: 8) {
@@ -800,47 +780,32 @@ struct CheckingView: View {
                 Text("Total includes accounts with positive balances. Any overdrafts are shown individually below.").font(.caption).foregroundStyle(theme.muted)
             }
             ForEach(store.household.checkingAccounts ?? []) { account in
-                NavigationLink { CheckingEditor(account: account) } label: {
-                    HStack {
-                        Image(systemName: "banknote").foregroundStyle(theme.accent)
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text(account.name).font(.headline)
-                            Text("Updated " + account.modified.formatted(date: .abbreviated, time: .omitted)).font(.caption).foregroundStyle(theme.muted)
-                        }
-                        Spacer()
-                        Text(account.balance.money).monospacedDigit()
-                        Image(systemName: "chevron.right")
-                    }.panel()
-                }.buttonStyle(.plain)
+                BankAccountBalanceRow(name: account.name, balance: account.balance, date: account.balanceDate ?? account.modified)
             }
-            if (store.household.checkingAccounts ?? []).isEmpty { Text("Add your first checking account to track your household’s available balances.").foregroundStyle(theme.muted) }
-            Button { adding = true } label: { Label("Add checking account", systemImage: "plus.circle") }.buttonStyle(PrimaryButton())
-            Text("Balances are entered manually and shared through household sync.").font(.caption).foregroundStyle(theme.muted)
+            if (store.household.checkingAccounts ?? []).isEmpty {
+                Text("Upload a checking statement to add an account and see its balance here.").foregroundStyle(theme.muted)
+            }
+            Text("Balances update from imported statements and are shared through household sync.").font(.caption).foregroundStyle(theme.muted)
         }.navigationTitle("Checking")
             .refreshable { await store.sync() }
-            .sheet(isPresented: $adding) { NavigationStack { CheckingEditor(account: CheckingAccount(name: "", balance: 0)) } }
     }
 }
-struct CheckingEditor: View {
-    @EnvironmentObject var store: Store
+
+private struct BankAccountBalanceRow: View {
     @Environment(\.appTheme) private var theme
-    @Environment(\.dismiss) private var dismiss
-    @State var account: CheckingAccount
+    let name: String
+    let balance: Double
+    let date: Date
+
     var body: some View {
-        Form {
-            Section("Checking account") {
-                TextField("Account nickname", text: $account.name)
-                TextField("Balance ($)", value: $account.balance, format: .number.precision(.fractionLength(2))).keyboardType(.numbersAndPunctuation)
+        HStack {
+            Image(systemName: "banknote").foregroundStyle(theme.accent)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(name).font(.headline)
+                Text("Balance as of " + date.formatted(date: .abbreviated, time: .omitted)).font(.caption).foregroundStyle(theme.muted)
             }
-            Button("Save account") {
-                account.name = account.name.trimmingCharacters(in: .whitespacesAndNewlines)
-                account.modified = Date()
-                store.household.mergeChecking([account]); store.save()
-                dismiss()
-                Task { await store.sync() }
-            }.disabled(!account.isValid)
-        }.scrollContentBackground(.hidden).background(theme.canvas)
-            .navigationTitle("Checking account").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+            Spacer()
+            Text(balance.money).monospacedDigit().fixedSize(horizontal: true, vertical: false)
+        }.panel()
     }
 }
