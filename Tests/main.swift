@@ -146,4 +146,116 @@ var legacyJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(edi
 legacyJSON.removeValue(forKey: "customCategory")
 let legacy = try JSONDecoder().decode(Entry.self, from: JSONSerialization.data(withJSONObject: legacyJSON))
 check(legacy.customCategory == nil && legacy.amount == edited.amount, "Previously saved transactions load without sign migration")
+let delayedCredit = amexHeader + [
+    amexCell("08/04/2026", 0.06, 0.17), amexCell("Online Transfer: Credit", 0.17, 0.17),
+    amexCell("2,500.00", 0.52, 0.185, 0.08), amexCell("3,500.00", 0.82, 0.185, 0.08),
+    amexCell("EXTERNAL ACCOUNT TRANSFER", 0.17, 0.21)
+]
+let delayedText = StatementParser.reconstructedRows(delayedCredit).joined(separator: "\n")
+let delayedEntries = StatementParser.parseText(delayedText, account: "Checking", year: 2026).0
+check(delayedEntries.count == 1 && delayedEntries[0].signedAmount == 2500 && delayedEntries[0].merchant == "EXTERNAL ACCOUNT TRANSFER", "Transfer credit below date line is retained with positive display sign")
+let wideCredit = amexHeader + [
+    amexCell("08/04/2026", 0.06, 0.17), amexCell("Online Transfer: Credit", 0.17, 0.17),
+    amexCell("12,500.00", 0.47, 0.17, 0.13), amexCell("13,500.00", 0.81, 0.17, 0.09),
+    amexCell("EXTERNAL ACCOUNT TRANSFER", 0.17, 0.195)
+]
+let wideEntries = StatementParser.parseText(StatementParser.reconstructedRows(wideCredit).joined(separator: "\n"), account: "Checking", year: 2026).0
+check(wideEntries.count == 1 && wideEntries[0].signedAmount == 12500, "Wide incoming amount is assigned by right edge to Credits")
+let missingThenValid = amexHeader + [
+    amexCell("08/04/2026", 0.06, 0.17), amexCell("Online Transfer: Credit", 0.17, 0.17),
+    amexCell("08/05/2026", 0.06, 0.195), amexCell("Debit Card Purchase", 0.17, 0.195), amexCell("20.00", 0.70, 0.195)
+]
+let missingText = StatementParser.reconstructedRows(missingThenValid).joined(separator: "\n")
+let missingEntries = StatementParser.parseText(missingText, account: "Checking", year: 2026).0
+check(missingText.contains("UNRECOGNIZED_TRANSACTION 08/04/2026") && missingEntries.count == 1 && missingEntries[0].signedAmount == -20, "Missing transfer is flagged without borrowing the next transaction amount")
+let conflicting = delayedCredit + [amexCell("10.00", 0.70, 0.185)]
+let conflictingText = StatementParser.reconstructedRows(conflicting).joined(separator: "\n")
+check(conflictingText.contains("UNRECOGNIZED_TRANSACTION") && StatementParser.parseText(conflictingText, account: "Checking", year: 2026).0.isEmpty, "Multiple debit and credit amounts in one row remain flagged rather than netted")
+var categoryHousehold = Household()
+let petsName = try categoryHousehold.addCategory("  Pet   care  ")
+check(petsName == "Pet care" && categoryHousehold.customCategoryNames == ["Pet care"], "Create reusable category without any transactions")
+_ = try categoryHousehold.addCategory("pet care")
+check(categoryHousehold.savedCategories?.count == 1, "Duplicate category names are reused case-insensitively")
+do { _ = try categoryHousehold.addCategory(" Utilities "); check(false, "Built-in category duplicate must fail") } catch { check(true, "Built-in category duplicate rejected") }
+do { _ = try categoryHousehold.addCategory("   "); check(false, "Empty category must fail") } catch { check(true, "Empty category rejected") }
+do { _ = try categoryHousehold.addCategory(String(repeating: "a", count: 41)); check(false, "Long category must fail") } catch { check(true, "Long category rejected") }
+let savedHousehold = try JSONDecoder().decode(Household.self, from: JSONEncoder().encode(categoryHousehold))
+check(savedHousehold.customCategoryNames == ["Pet care"], "Unused categories survive household persistence")
+let remoteCategory = SavedCategory(name: "School")
+categoryHousehold.mergeCategories([remoteCategory])
+categoryHousehold.mergeCategories([remoteCategory])
+categoryHousehold.mergeCategories([SavedCategory(name: "PET CARE")])
+check(categoryHousehold.savedCategories?.count == 3 && categoryHousehold.customCategoryNames.count == 2, "Category sync merges IDs and collapses concurrent duplicate names in picker")
+var oldHouseholdJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(categoryHousehold)) as! [String: Any]
+oldHouseholdJSON.removeValue(forKey: "savedCategories")
+let oldHousehold = try JSONDecoder().decode(Household.self, from: JSONSerialization.data(withJSONObject: oldHouseholdJSON))
+check(oldHousehold.customCategoryNames.isEmpty, "Old household format remains readable")
+var oldOther = a; oldOther.category = .other; oldOther.otherDescription = "Hobbies"
+check(Household(entries: [oldOther]).customCategoryNames == ["Hobbies"], "Existing Other labels become reusable choices")
+let remoteRoundTrip = try JSONDecoder().decode(SavedCategory.self, from: JSONEncoder().encode(remoteCategory))
+check(remoteRoundTrip.id == remoteCategory.id && remoteRoundTrip.name == "School", "Cloud category payload preserves name and identity")
+var monthCalendar = Calendar(identifier: .gregorian)
+monthCalendar.timeZone = TimeZone(secondsFromGMT: 0)!
+func monthDate(_ year: Int, _ month: Int, _ day: Int = 1) -> Date {
+    monthCalendar.date(from: DateComponents(year: year, month: month, day: day))!
+}
+var januaryExpense = a; januaryExpense.date = monthDate(2026, 1, 15); januaryExpense.amount = 40
+var januaryIncome = a; januaryIncome.id = UUID(); januaryIncome.date = monthDate(2026, 1, 20); januaryIncome.amount = -200
+var lastYearExpense = a; lastYearExpense.id = UUID(); lastYearExpense.date = monthDate(2025, 1, 15); lastYearExpense.amount = 90
+let january = SpendingMonth(monthDate(2026, 1, 31), entries: [januaryExpense, januaryIncome, lastYearExpense], calendar: monthCalendar)
+check(january.entries.count == 2 && january.total == 40, "Selected month excludes other years and income from spending")
+check(january.moved(by: -1) == monthDate(2025, 12) && january.moved(by: 1) == monthDate(2026, 2), "Month arrows cross year and month-end boundaries correctly")
+check(SpendingMonth(monthDate(2024, 2), entries: [], calendar: monthCalendar).dayCount == 29 && SpendingMonth(monthDate(2025, 2), entries: [], calendar: monthCalendar).dayCount == 28, "Daily charts use correct February length")
+check(SpendingMonth(monthDate(2026, 3), entries: [januaryExpense], calendar: monthCalendar).total == 0, "Empty selected month has zero spending")
+var linkedHousehold = Household()
+let sourceOne = UUID(), sourceTwo = UUID(), linkedCard = UUID()
+check(linkedHousehold.importEntries([a], statementID: sourceOne, cardID: linkedCard) == 1, "Import attaches statement and stable card ID")
+check(linkedHousehold.entries[0].sourceStatementIDs == [sourceOne] && linkedHousehold.entries[0].cardID == linkedCard, "Imported transaction retains provenance")
+_ = linkedHousehold.importEntries([a], statementID: sourceTwo, cardID: linkedCard)
+check(linkedHousehold.entries.count == 1 && Set(linkedHousehold.entries[0].sourceStatementIDs ?? []) == Set([sourceOne, sourceTwo]), "Reimport links existing activity to both statements without duplicating it")
+_ = linkedHousehold.importEntries([a], statementID: sourceTwo, cardID: UUID())
+check(linkedHousehold.entries.count == 2, "Identical activity on distinct cards stays separate")
+let provenanceRoundTrip = try JSONDecoder().decode(Household.self, from: JSONEncoder().encode(linkedHousehold))
+check(provenanceRoundTrip.entries[0].sourceStatementIDs?.count == 2 && provenanceRoundTrip.entries[0].cardID == linkedCard, "Statement and card links survive persistence and cloud encoding")
+var legacyEntryJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(a)) as! [String: Any]
+legacyEntryJSON.removeValue(forKey: "sourceStatementIDs"); legacyEntryJSON.removeValue(forKey: "cardID")
+let unlinkedLegacy = try JSONDecoder().decode(Entry.self, from: JSONSerialization.data(withJSONObject: legacyEntryJSON))
+check(unlinkedLegacy.cardID == nil && unlinkedLegacy.sourceStatementIDs == nil, "Older activity loads without guessed statement or card links")
+var excludedRecurring = a; excludedRecurring.recurringOverride = false
+let recurringAfterOverride = Insights.recurring([excludedRecurring, b])
+check(!recurringAfterOverride.contains(a.id) && recurringAfterOverride.contains(b.id), "Not recurring removes only the selected transaction label")
+var manualRecurring = a; manualRecurring.recurringOverride = true
+check(Insights.recurring([manualRecurring]).contains(a.id), "Manual recurring works without automatic history")
+manualRecurring.recurringOverride = nil
+check(!Insights.recurring([manualRecurring]).contains(a.id), "Automatic mode restores detection")
+let overrideRoundTrip = try JSONDecoder().decode(Entry.self, from: JSONEncoder().encode(excludedRecurring))
+check(overrideRoundTrip.recurringOverride == false, "Recurring exclusion survives household sync encoding")
+check((-2.0).formatted(.number.locale(Locale(identifier: "en_US")).precision(.fractionLength(2))) == "-2.00", "Editable dollar amount retains two decimal places")
+var savingsHousehold = Household()
+let savingsOne = SavingsAccount(name: "Emergency fund", balance: 2000)
+let savingsTwo = SavingsAccount(name: "Vacation", balance: 350.50)
+savingsHousehold.mergeSavings([savingsOne, savingsTwo])
+check(savingsHousehold.totalSavings == 2350.50, "Savings total combines household accounts")
+var newerSavings = savingsOne; newerSavings.balance = 2200; newerSavings.modified = savingsOne.modified.addingTimeInterval(10)
+savingsHousehold.mergeSavings([newerSavings, savingsOne])
+check(savingsHousehold.totalSavings == 2550.50 && savingsHousehold.savingsAccounts?.count == 2, "Savings sync keeps newer balance without duplicating account")
+let savingsRoundTrip = try JSONDecoder().decode(Household.self, from: JSONEncoder().encode(savingsHousehold))
+check(savingsRoundTrip.totalSavings == 2550.50, "Savings balances survive persistence")
+check(!SavingsAccount(name: "", balance: 2).isValid && !SavingsAccount(name: "Savings", balance: -2).isValid && !SavingsAccount(name: "Savings", balance: .infinity).isValid, "Savings editor rejects invalid names and balances")
+check(oldHousehold.totalSavings == 0, "Older household data defaults to empty savings")
+check(january.moneyReceived == 200, "Monthly money received excludes spending and other months")
+check(Household(entries: [januaryExpense, januaryIncome]).totalMoneyReceived == 200, "All-time money received includes incoming credits only")
+var checkingHousehold = Household()
+let checkingOne = CheckingAccount(name: "Everyday checking", balance: 1000.25)
+let checkingTwo = CheckingAccount(name: "Joint checking", balance: 500)
+let overdraft = CheckingAccount(name: "Other checking", balance: -20)
+checkingHousehold.mergeChecking([checkingOne, checkingTwo, overdraft])
+check(checkingHousehold.positiveCheckingBalance == 1500.25 && checkingHousehold.checkingAccounts?.count == 3, "Positive checking total excludes overdraft while retaining its account")
+var updatedChecking = checkingOne; updatedChecking.balance = 1100.25; updatedChecking.modified = checkingOne.modified.addingTimeInterval(10)
+checkingHousehold.mergeChecking([updatedChecking, checkingOne])
+check(checkingHousehold.positiveCheckingBalance == 1600.25, "Checking sync retains newer balances")
+let checkingRoundTrip = try JSONDecoder().decode(Household.self, from: JSONEncoder().encode(checkingHousehold))
+check(checkingRoundTrip.positiveCheckingBalance == 1600.25 && checkingRoundTrip.checkingAccounts?.last?.balance == -20, "Checking balances survive persistence including overdrafts")
+check(oldHousehold.positiveCheckingBalance == 0, "Older household data defaults to no checking balances")
+check(overdraft.isValid && !CheckingAccount(name: " ", balance: 10).isValid && !CheckingAccount(name: "Checking", balance: .nan).isValid, "Checking accepts finite overdrafts and rejects invalid input")
 print("\(checks) checks passed")

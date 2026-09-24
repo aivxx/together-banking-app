@@ -7,6 +7,8 @@ struct ImportView: View {
     @Environment(\.dismiss) var dismiss
     @State private var picker = false
     @State private var account = "Checking"
+    @State private var selectedCardID: UUID?
+    private var selectedCard: Card? { store.household.cards.first { $0.id == selectedCardID } }
     @State private var year = Calendar.current.component(.year, from: Date())
     @State private var draft: ImportDraft?
     @State private var entries: [Entry] = []
@@ -19,12 +21,21 @@ struct ImportView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section("Credit card") {
+                    Picker("Attach to card", selection: $selectedCardID) {
+                        Text("No credit card").tag(nil as UUID?)
+                        ForEach(store.household.cards) { card in Text(card.name + " · " + card.lastFour).tag(Optional(card.id)) }
+                    }
+                }
                 if let draft {
                     Section {
                         Label(draft.name, systemImage: "doc.text").font(.headline)
                         Text("\(entries.count) transactions found. \(draft.skipped) non-transaction or unrecognized lines skipped. Compare with the original statement; some layouts may be incomplete.").font(.caption).foregroundStyle(theme.muted)
+                        if draft.unrecognizedTransactions > 0 {
+                            Label("\(draft.unrecognizedTransactions) transaction rows could not be read. This import is incomplete; compare it with the original statement.", systemImage: "exclamationmark.triangle.fill")
+                                .font(.callout).foregroundStyle(.orange)
+                        }
                         Button("Reverse all amount signs") { for index in entries.indices { entries[index].amount *= -1 } }
-                        Text("Money out is negative. Deposits, refunds, and money received are positive.").font(.caption).foregroundStyle(theme.muted)
                     }
                     Section("Review transactions · swipe to remove") {
                         ForEach($entries) { $entry in
@@ -34,30 +45,25 @@ struct ImportView: View {
                                     Label("Description missing. Check the statement and enter the merchant or payment details.", systemImage: "exclamationmark.triangle")
                                         .font(.caption).foregroundStyle(.orange)
                                 }
-                                HStack { DatePicker("Date", selection: $entry.date, displayedComponents: .date).labelsHidden(); Spacer(); TextField("Amount", value: $entry.signedAmount, format: .number).keyboardType(.numbersAndPunctuation).multilineTextAlignment(.trailing) }
-                                Picker("Category", selection: $entry.category) { ForEach(Category.allCases) { Text($0.rawValue).tag($0) } }.font(.caption)
-                                if entry.category == .other {
-                                    TextField("Describe Other (e.g. Pets)", text: $entry.otherDescription)
-                                        .textInputAutocapitalization(.sentences)
-                                }
+                                HStack { DatePicker("Date", selection: $entry.date, displayedComponents: .date).labelsHidden(); Spacer(); TextField("Amount", value: $entry.signedAmount, format: .number.precision(.fractionLength(2))).keyboardType(.numbersAndPunctuation).multilineTextAlignment(.trailing) }
+                                TransactionCategoryPicker(entry: $entry)
                             }.padding(.vertical, 4)
                         }.onDelete { entries.remove(atOffsets: $0) }
                     }
-                    if store.household.cards.contains(where: { $0.name == account }) {
+                    if selectedCard != nil {
                         Section {
                             Toggle("Update this card’s statement balance", isOn: $updateBalance)
-                            if updateBalance { TextField("Statement balance", value: $cardBalance, format: .number).keyboardType(.decimalPad) }
+                            if updateBalance { TextField("Statement balance", value: $cardBalance, format: .number.precision(.fractionLength(2))).keyboardType(.decimalPad) }
                         } footer: { Text("Confirm this balance against the statement. It replaces the saved balance for \(account).") }
                     }
                     Section { Toggle("I checked these against my statement", isOn: $reviewed) }
-                    Section { Button("Import \(entries.count) transactions") { store.add(draft, entries: entries, cardBalance: updateBalance ? cardBalance : nil, account: account); dismiss() }.disabled(!canImport) } footer: { Text("Matching transactions already saved for this account are skipped. The original document is saved with your household. You can also update balances and payment dates in Cards.") }
+                    Section { Button("Import \(entries.count) transactions") { store.add(draft, entries: entries, cardBalance: updateBalance ? cardBalance : nil, account: account, cardID: selectedCardID); dismiss() }.disabled(!canImport) } footer: { Text("Matching transactions already saved for this account are linked to this statement without adding duplicates. The original document is saved with your household. You can also update balances and payment dates in Cards.") }
                 } else {
                     Section {
                         VStack(alignment: .leading, spacing: 12) { Image(systemName: "doc.text.viewfinder").font(.largeTitle).foregroundStyle(theme.accent); Text("Turn statements into clarity.").font(.title2.bold()); Text("PDF, scanned PDF, CSV, or text. Reading and category suggestions happen on this iPhone.").font(.subheadline).foregroundStyle(theme.muted) }.padding(.vertical, 12)
                     }
                     Section {
                         TextField("Account or card nickname", text: $account)
-                        if !store.household.cards.isEmpty { Picker("Use a saved card", selection: $account) { Text("Checking").tag("Checking"); ForEach(store.household.cards) { Text($0.name).tag($0.name) } } }
                         Stepper("Statement year: \(String(year))", value: $year, in: 2000...2100)
                     } header: { Text("Statement details") } footer: { Text("The year is used for dates without a year. For statements spanning December and January, check each date during review.") }
                     Section { Button { picker = true } label: { HStack { Label(busy ? "Reading statement…" : "Choose a document", systemImage: "folder"); if busy { Spacer(); ProgressView() } } }.disabled(busy || account.trimmingCharacters(in: .whitespaces).isEmpty) }
@@ -65,6 +71,11 @@ struct ImportView: View {
                 }
             }.scrollContentBackground(.hidden).background(theme.canvas).navigationTitle(draft == nil ? "Upload statement" : "Review import").navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+                .onChange(of: selectedCardID) { _, _ in
+                    account = selectedCard?.name ?? "Checking"
+                    for index in entries.indices { entries[index].account = account }
+                    updateBalance = selectedCard != nil && draft?.suggestedBalance != nil
+                }
                 .fileImporter(isPresented: $picker, allowedContentTypes: [.pdf, .commaSeparatedText, .plainText]) { result in
                     switch result {
                     case .success(let url):
@@ -73,7 +84,7 @@ struct ImportView: View {
                         Task {
                             do {
                                 let parsed = try await Task.detached(priority: .userInitiated) { try StatementParser.parse(url: url, account: selectedAccount, year: selectedYear) }.value
-                                draft = parsed; entries = parsed.entries; cardBalance = parsed.suggestedBalance ?? 0; updateBalance = parsed.suggestedBalance != nil && store.household.cards.contains(where: { $0.name == account })
+                                draft = parsed; entries = parsed.entries; cardBalance = parsed.suggestedBalance ?? 0; updateBalance = parsed.suggestedBalance != nil && selectedCard != nil
                             } catch { self.error = error.localizedDescription }
                             busy = false
                         }

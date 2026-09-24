@@ -39,15 +39,20 @@ import CloudKit
             if ok { unlocked = true; if enable { lockEnabled = true; UserDefaults.standard.set(true, forKey: "lockEnabled") } }
         } catch { self.error = error.localizedDescription }
     }
-    func add(_ draft: ImportDraft, entries: [Entry], cardBalance: Double? = nil, account: String = "") {
-        let new = entries.filter { entry in !household.entries.contains { $0.date == entry.date && $0.merchant == entry.merchant && $0.amount == entry.amount && $0.account == entry.account } }
-        household.entries += new
-        household.statements.append(Statement(name: draft.name, count: new.count, data: draft.data))
-        if let balance = cardBalance, let index = household.cards.firstIndex(where: { $0.name == account }) {
+    func add(_ draft: ImportDraft, entries: [Entry], cardBalance: Double? = nil, account: String = "", cardID: UUID? = nil) {
+        var statement = Statement(name: draft.name, count: 0, data: draft.data)
+        statement.count = household.importEntries(entries, statementID: statement.id, cardID: cardID)
+        household.statements.append(statement)
+        if let balance = cardBalance, let index = household.cards.firstIndex(where: { $0.id == cardID }) {
             household.cards[index].balance = balance
             household.cards[index].modified = Date()
         }
         save()
+    }
+    func addCategory(_ name: String) throws -> String {
+        let category = try household.addCategory(name)
+        save()
+        return category
     }
     func sync() async {
         guard let cloud, !syncing else { return }
@@ -64,6 +69,9 @@ import CloudKit
                 else { synced.cards.append(card) }
             }
             for statement in household.statements where !synced.statements.contains(where: { $0.id == statement.id }) { synced.statements.append(statement) }
+            synced.mergeCategories(household.savedCategories ?? [])
+            synced.mergeSavings(household.savingsAccounts ?? [])
+            synced.mergeChecking(household.checkingAccounts ?? [])
             household = synced; save(); cloudStatus = "Synced just now"
         }
         catch { self.error = error.localizedDescription; cloudStatus = "Sync needs attention" }
@@ -139,6 +147,12 @@ import CloudKit
             } else if kind == "card" {
                 let remote = try decoder.decode(Card.self, from: data)
                 if let index = merged.cards.firstIndex(where: { $0.id == remote.id }) { if remote.modified > merged.cards[index].modified { merged.cards[index] = remote } } else { merged.cards.append(remote) }
+            } else if kind == "checking" {
+                merged.mergeChecking([try decoder.decode(CheckingAccount.self, from: data)])
+            } else if kind == "savings" {
+                merged.mergeSavings([try decoder.decode(SavingsAccount.self, from: data)])
+            } else if kind == "category" {
+                merged.mergeCategories([try decoder.decode(SavedCategory.self, from: data)])
             } else if kind == "statement" {
                 let remote = try decoder.decode(Statement.self, from: data)
                 if !merged.statements.contains(where: { $0.id == remote.id }) { merged.statements.append(remote) }
@@ -146,6 +160,9 @@ import CloudKit
         }
         let encoder = JSONEncoder()
         var items: [(UUID, String, Data)] = []
+        for account in merged.checkingAccounts ?? [] { items.append((account.id, "checking", try encoder.encode(account))) }
+        for account in merged.savingsAccounts ?? [] { items.append((account.id, "savings", try encoder.encode(account))) }
+        for category in merged.savedCategories ?? [] { items.append((category.id, "category", try encoder.encode(category))) }
         for entry in merged.entries { items.append((entry.id, "entry", try encoder.encode(entry))) }
         for card in merged.cards { items.append((card.id, "card", try encoder.encode(card))) }
         for statement in merged.statements { items.append((statement.id, "statement", try encoder.encode(statement))) }

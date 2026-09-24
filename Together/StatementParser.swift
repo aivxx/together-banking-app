@@ -11,6 +11,7 @@ struct ImportDraft {
     var data: Data
     var skipped: Int
     var suggestedBalance: Double? = nil
+    var unrecognizedTransactions: Int = 0
 }
 enum ImportError: LocalizedError {
     case unreadable, empty, tooLarge
@@ -72,7 +73,7 @@ enum StatementParser {
         } else { guard let string = String(data: data, encoding: .utf8) else { throw ImportError.unreadable }; text = string }
         let parsed = parseText(text, account: account, year: year)
         guard !parsed.0.isEmpty else { throw ImportError.empty }
-        return ImportDraft(entries: parsed.0, name: url.lastPathComponent, data: data, skipped: parsed.1, suggestedBalance: statementBalance(text))
+        return ImportDraft(entries: parsed.0, name: url.lastPathComponent, data: data, skipped: parsed.1, suggestedBalance: statementBalance(text), unrecognizedTransactions: text.components(separatedBy: "UNRECOGNIZED_TRANSACTION").count - 1)
     }
     #endif
     struct TextFragment {
@@ -137,14 +138,17 @@ enum StatementParser {
     static func bankTableRows(_ rows: [[TextFragment]]) -> [String]? {
         var columns: (description: Double, credit: Double, debit: Double, balance: Double)?
         var output: [String] = []
-        var pending: (date: String, details: [String], amount: Double?)?
+        var pending: (date: String, details: [String], amounts: [(Int, Double)])?
         var lastY: Double?
         var lastHeight = 0.0
         func flush() {
-            if let item = pending, let amount = item.amount, !item.details.isEmpty {
+            if let item = pending, item.amounts.count == 1, !item.details.isEmpty {
+                let amount = item.amounts[0].0 == 0 ? -abs(item.amounts[0].1) : abs(item.amounts[0].1)
                 let details = item.details.count > 1 && isGenericDescription(item.details[0]) ? Array(item.details.dropFirst()) : item.details
                 let escaped = details.joined(separator: " · ").replacingOccurrences(of: "\"", with: "'")
                 output.append("\(item.date),\"\(escaped)\",\(amount)")
+            } else if let item = pending {
+                output.append("UNRECOGNIZED_TRANSACTION " + item.date)
             }
             pending = nil
         }
@@ -163,27 +167,31 @@ enum StatementParser {
             let height = row.map(\.height).max() ?? 0
             let dateCell = row.first { $0.x < columns.description - 0.01 && date($0.text, year: 2000) != nil }
             let descriptionEnd = columns.credit - (columns.debit - columns.credit) * 0.5
-            let description = row.filter { $0.x >= columns.description - 0.015 && $0.x < descriptionEnd }
-                .map(\.text).joined(separator: " ")
+            func moneyCell(_ cell: TextFragment) -> (Int, Double)? {
+                // Use the right edge: long credit amounts can start left of the
+                // description boundary while still ending inside the Credits column.
+                let edge = cell.x + cell.width
+                guard edge >= descriptionEnd,
+                      cell.text.range(of: #"^(?:[-+]?\$?[\d,]+\.\d{2}(?:CR)?|\(\$?[\d,]+\.\d{2}\))$"#, options: [.regularExpression, .caseInsensitive]) != nil,
+                      let value = amount(cell.text) else { return nil }
+                let edges = [columns.credit, columns.debit, columns.balance]
+                let nearest = edges.indices.min { abs(edges[$0] - edge) < abs(edges[$1] - edge) }!
+                return (nearest, value)
+            }
+            let descriptionCells = row.filter {
+                $0.x >= columns.description - 0.015 && $0.x < descriptionEnd && moneyCell($0) == nil
+            }
+            let description = descriptionCells.map(\.text).joined(separator: " ")
+            let amounts = row.compactMap(moneyCell).filter { $0.0 != 2 }
             if let dateCell {
                 flush()
                 if isBalanceSummary(description) { lastY = nil; continue }
-                var amounts: [(Int, Double)] = []
-                for cell in row where cell.x >= descriptionEnd {
-                    guard cell.text.range(of: #"^[-+]?\$?[\d,]+\.\d{2}$"#, options: .regularExpression) != nil,
-                          let value = amount(cell.text) else { continue }
-                    let edges = [columns.credit, columns.debit, columns.balance]
-                    let edge = cell.x + cell.width
-                    let nearest = edges.indices.min { abs(edges[$0] - edge) < abs(edges[$1] - edge) }!
-                    if nearest != 2 { amounts.append((nearest, value)) }
-                }
-                // Both columns populated is ambiguous; don't invent a net transaction.
-                let value = amounts.count == 1 ? (amounts[0].0 == 0 ? -abs(amounts[0].1) : abs(amounts[0].1)) : nil
-                pending = (dateCell.text, description.isEmpty ? [] : [description], value)
+                pending = (dateCell.text, description.isEmpty ? [] : [description], amounts)
             } else if pending != nil, let lastY, y - lastY <= max(height, lastHeight) * 2.2,
-                      !description.isEmpty, isDescriptionContinuation(description),
-                      row.allSatisfy({ $0.x >= columns.description - 0.015 && $0.x < descriptionEnd }) {
-                pending?.details.append(description)
+                      (description.isEmpty || isDescriptionContinuation(description)),
+                      row.allSatisfy({ cell in descriptionCells.contains(where: { $0.x == cell.x && $0.text == cell.text }) || moneyCell(cell) != nil }) {
+                if !description.isEmpty { pending?.details.append(description) }
+                pending?.amounts.append(contentsOf: amounts)
             } else {
                 flush()
             }
