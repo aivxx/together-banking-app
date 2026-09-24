@@ -7,11 +7,27 @@ struct Entry: Identifiable, Codable, Hashable {
     var amount: Double
     var category: Category
     var account: String
+    var customCategory: String? = nil
+    // Keep the existing persisted expense-positive convention for sync compatibility.
+    // All transaction displays and editors use the bank's money-in/money-out signs.
+    var signedAmount: Double {
+        get { amount == 0 ? 0 : -amount }
+        set { amount = newValue == 0 ? 0 : -newValue }
+    }
+    var signedMoney: String { (signedAmount > 0 ? "+" : "") + signedAmount.money }
+    var otherDescription: String {
+        get { customCategory ?? "" }
+        set { customCategory = newValue.isEmpty ? nil : newValue }
+    }
+    var categoryName: String {
+        let label = otherDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        return category == .other && !label.isEmpty ? label : category.rawValue
+    }
     var reviewed = false
     var modified = Date()
 }
 enum Category: String, Codable, CaseIterable, Identifiable {
-    case groceries = "Groceries", dining = "Food & drink", shopping = "Shopping", transport = "Transport", home = "Home", health = "Health", entertainment = "Entertainment", travel = "Travel", income = "Income & payments", other = "Other"
+    case groceries = "Groceries", dining = "Food & drink", shopping = "Shopping", transport = "Transport", home = "Home", utilities = "Utilities", health = "Health", entertainment = "Entertainment", travel = "Travel", income = "Income & payments", other = "Other"
     var id: String { rawValue }
     var icon: String {
         switch self {
@@ -20,6 +36,7 @@ enum Category: String, Codable, CaseIterable, Identifiable {
         case .shopping: "bag.fill"
         case .transport: "car.fill"
         case .home: "house.fill"
+        case .utilities: "bolt.fill"
         case .health: "cross.case.fill"
         case .entertainment: "play.rectangle.fill"
         case .travel: "airplane"
@@ -29,7 +46,7 @@ enum Category: String, Codable, CaseIterable, Identifiable {
     }
     static func suggest(_ text: String) -> Category {
         let s = text.lowercased()
-        let rules: [(Category, [String])] = [(.income,["payment received","payroll","refund","autopay payment"]),(.groceries,["trader joe","whole foods","safeway","grocery","costco"]),(.dining,["coffee","starbucks","restaurant","cafe","doordash","sweetgreen"]),(.transport,["uber","lyft","shell","chevron","parking"]),(.entertainment,["netflix","spotify","hulu","apple.com","disney"]),(.home,["electric","water","rent","internet","comcast"]),(.health,["pharmacy","cvs","medical"]),(.travel,["airlines","hotel","airbnb"]),(.shopping,["amazon","target","store","nike"])]
+        let rules: [(Category, [String])] = [(.income,["payment received","payroll","refund","autopay payment"]),(.groceries,["trader joe","whole foods","safeway","grocery","costco"]),(.dining,["coffee","starbucks","restaurant","cafe","doordash","sweetgreen"]),(.transport,["uber","lyft","shell","chevron","parking"]),(.entertainment,["netflix","spotify","hulu","apple.com","disney"]),(.utilities,["electric","water company","water compa","water bill","utilities","utility","internet","comcast","xfinity","natural gas","sewer","pg&e"]),(.home,["rent"]),(.health,["pharmacy","cvs","medical"]),(.travel,["airlines","hotel","airbnb"]),(.shopping,["amazon","target","store","nike"])]
         return rules.first { $0.1.contains(where: s.contains) }?.0 ?? .other
     }
 }

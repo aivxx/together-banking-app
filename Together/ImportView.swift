@@ -24,7 +24,7 @@ struct ImportView: View {
                         Label(draft.name, systemImage: "doc.text").font(.headline)
                         Text("\(entries.count) transactions found. \(draft.skipped) non-transaction or unrecognized lines skipped. Compare with the original statement; some layouts may be incomplete.").font(.caption).foregroundStyle(theme.muted)
                         Button("Reverse all amount signs") { for index in entries.indices { entries[index].amount *= -1 } }
-                        Text("Use positive amounts for spending, negative amounts for payments, refunds, and income.").font(.caption).foregroundStyle(theme.muted)
+                        Text("Money out is negative. Deposits, refunds, and money received are positive.").font(.caption).foregroundStyle(theme.muted)
                     }
                     Section("Review transactions · swipe to remove") {
                         ForEach($entries) { $entry in
@@ -34,8 +34,12 @@ struct ImportView: View {
                                     Label("Description missing. Check the statement and enter the merchant or payment details.", systemImage: "exclamationmark.triangle")
                                         .font(.caption).foregroundStyle(.orange)
                                 }
-                                HStack { DatePicker("Date", selection: $entry.date, displayedComponents: .date).labelsHidden(); Spacer(); TextField("Amount", value: $entry.amount, format: .number).keyboardType(.numbersAndPunctuation).multilineTextAlignment(.trailing) }
+                                HStack { DatePicker("Date", selection: $entry.date, displayedComponents: .date).labelsHidden(); Spacer(); TextField("Amount", value: $entry.signedAmount, format: .number).keyboardType(.numbersAndPunctuation).multilineTextAlignment(.trailing) }
                                 Picker("Category", selection: $entry.category) { ForEach(Category.allCases) { Text($0.rawValue).tag($0) } }.font(.caption)
+                                if entry.category == .other {
+                                    TextField("Describe Other (e.g. Pets)", text: $entry.otherDescription)
+                                        .textInputAutocapitalization(.sentences)
+                                }
                             }.padding(.vertical, 4)
                         }.onDelete { entries.remove(atOffsets: $0) }
                     }
@@ -57,7 +61,7 @@ struct ImportView: View {
                         Stepper("Statement year: \(String(year))", value: $year, in: 2000...2100)
                     } header: { Text("Statement details") } footer: { Text("The year is used for dates without a year. For statements spanning December and January, check each date during review.") }
                     Section { Button { picker = true } label: { HStack { Label(busy ? "Reading statement…" : "Choose a document", systemImage: "folder"); if busy { Spacer(); ProgressView() } } }.disabled(busy || account.trimmingCharacters(in: .whitespaces).isEmpty) }
-                    Section { Text("CSV format: Date, Description, Amount. Dates: YYYY-MM-DD or MM/DD/YYYY. Positive amounts are expenses. PDF tables and scanned pages are read on this iPhone. Check the detected transactions and amount signs against your statement; some layouts may need correction. Up to 15 MB and the first 50 PDF pages.").font(.caption).foregroundStyle(theme.muted) }
+                    Section { Text("CSV format: Date, Description, Amount. Dates: YYYY-MM-DD or MM/DD/YYYY. For CSV source files, positive amounts mean expenses; the review displays expenses as negative. PDF tables and scanned pages are read on this iPhone. Check the detected transactions and amount signs against your statement; some layouts may need correction. Up to 15 MB and the first 50 PDF pages.").font(.caption).foregroundStyle(theme.muted) }
                 }
             }.scrollContentBackground(.hidden).background(theme.canvas).navigationTitle(draft == nil ? "Upload statement" : "Review import").navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }

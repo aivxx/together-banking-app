@@ -126,4 +126,24 @@ let pageTwo = amexHeader + [amexCell("08/10/2026", 0.06, 0.17), amexCell("Online
 let pageTwoEntries = StatementParser.parseText(StatementParser.reconstructedRows(pageTwo).joined(separator: "\n"), account: "Checking", year: 2026).0
 check(pageTwoEntries.count == 1 && pageTwoEntries[0].merchant == "CARD PAYMENT" && pageTwoEntries[0].amount == 80, "Repeated page headers work without carrying descriptions across pages")
 check(StatementParser.preferredText(native: "08/04/2026 Credit 1250.00", positioned: "Date,Description,Amount", account: "Checking", year: 2026) == "Date,Description,Amount", "Recognized table never falls back to a balance-only native row")
+check(amex[0].signedAmount == 250 && amex[1].signedAmount == -45, "Amex deposits display positive and withdrawals negative")
+var edited = amex[1]
+edited.signedAmount = -72.50
+check(edited.amount == 72.50 && edited.signedAmount == -72.50, "Editing negative expense preserves spending calculations")
+edited.signedAmount = 120
+check(edited.amount == -120 && !Insights.unusual(edited, in: [edited]), "Editing positive deposit does not classify it as spending")
+check(Category.suggest("SAN JOSE WATER COMPANY") == .utilities && Category.suggest("COMCAST-XFINITY CABLE SVCS") == .utilities && Category.suggest("ELECTRIC BILL") == .utilities, "Utilities suggestions cover water electricity and internet")
+edited.category = .other
+edited.otherDescription = "Pets"
+let customRoundTrip = try JSONDecoder().decode(Entry.self, from: JSONEncoder().encode(edited))
+check(customRoundTrip.categoryName == "Pets" && customRoundTrip.otherDescription == "Pets", "Custom Other label survives disk and cloud encoding")
+edited.otherDescription = "   "
+check(edited.categoryName == "Other", "Blank custom label falls back to Other")
+edited.otherDescription = "Pets"
+edited.category = .utilities
+check(edited.categoryName == "Utilities", "Custom label is only displayed for Other")
+var legacyJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(edited)) as! [String: Any]
+legacyJSON.removeValue(forKey: "customCategory")
+let legacy = try JSONDecoder().decode(Entry.self, from: JSONSerialization.data(withJSONObject: legacyJSON))
+check(legacy.customCategory == nil && legacy.amount == edited.amount, "Previously saved transactions load without sign migration")
 print("\(checks) checks passed")

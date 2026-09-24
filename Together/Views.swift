@@ -115,7 +115,7 @@ struct Dashboard: View {
     var total: Double { monthly.reduce(0) { $0 + $1.amount } }
     var flags: [Entry] { entries.filter { Insights.unusual($0, in: entries) } }
     var recurring: Set<UUID> { Insights.recurring(entries) }
-    var categories: [(Category, Double)] { Dictionary(grouping: monthly, by: \.category).map { ($0.key, $0.value.reduce(0) { $0 + $1.amount }) }.sorted { $0.1 > $1.1 } }
+    var categories: [(String, Double, String)] { Dictionary(grouping: monthly, by: \.categoryName).map { ($0.key, $0.value.reduce(0) { $0 + $1.amount }, $0.value.first?.category.icon ?? Category.other.icon) }.sorted { $0.1 > $1.1 } }
     var body: some View {
         Page {
             HStack {
@@ -148,7 +148,7 @@ struct Dashboard: View {
                 NavigationLink { InsightsView() } label: {
                     HStack(spacing: 12) {
                         Image(systemName: "sparkle.magnifyingglass").font(.title2).foregroundStyle(Color.orange)
-                        VStack(alignment: .leading, spacing: 5) { Text("Worth a second look").font(.subheadline.weight(.semibold)).foregroundStyle(.white); Text("\(flag.merchant) · \(flag.amount.money)").font(.caption).foregroundStyle(theme.muted) }
+                        VStack(alignment: .leading, spacing: 5) { Text("Worth a second look").font(.subheadline.weight(.semibold)).foregroundStyle(.white); Text("\(flag.merchant) · \(flag.signedMoney)").font(.caption).foregroundStyle(theme.muted) }
                         Spacer(); Image(systemName: "chevron.right").font(.caption).foregroundStyle(theme.muted)
                     }.panel()
                 }.buttonStyle(.plain)
@@ -158,9 +158,9 @@ struct Dashboard: View {
                 if categories.isEmpty { Text("Your categories will appear after your first import.").font(.subheadline).foregroundStyle(theme.muted) }
                 ForEach(Array(categories.prefix(4).enumerated()), id: \.element.0) { index, item in
                     HStack(spacing: 12) {
-                        Image(systemName: item.0.icon).foregroundStyle(index == 0 ? theme.accent : theme.secondaryAccent).frame(width: 34, height: 34).background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
+                        Image(systemName: item.2).foregroundStyle(index == 0 ? theme.accent : theme.secondaryAccent).frame(width: 34, height: 34).background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
                         VStack(alignment: .leading, spacing: 7) {
-                            HStack { Text(item.0.rawValue).font(.subheadline); Spacer(); Text(item.1.money).font(.subheadline.monospacedDigit()) }
+                            HStack { Text(item.0).font(.subheadline); Spacer(); Text(item.1.money).font(.subheadline.monospacedDigit()) }
                             GeometryReader { proxy in Capsule().fill(Color.white.opacity(0.06)).overlay(alignment: .leading) { Capsule().fill(index == 0 ? theme.accent : theme.secondaryAccent.opacity(0.7)).frame(width: proxy.size.width * item.1 / max(total, 1)) } }.frame(height: 4)
                         }
                     }
@@ -183,9 +183,9 @@ struct EntryRow: View {
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: entry.category.icon).font(.system(size: 17)).foregroundStyle(theme.accent).frame(width: 42, height: 42).background(theme.panel, in: RoundedRectangle(cornerRadius: 13))
-            VStack(alignment: .leading, spacing: 5) { Text(entry.merchant).font(.subheadline.weight(.medium)).lineLimit(1); Text(entry.category.rawValue + " · " + entry.date.formatted(.dateTime.month(.abbreviated).day())).font(.caption2).foregroundStyle(theme.muted) }
+            VStack(alignment: .leading, spacing: 5) { Text(entry.merchant).font(.subheadline.weight(.medium)).lineLimit(1); Text(entry.categoryName + " · " + entry.date.formatted(.dateTime.month(.abbreviated).day())).font(.caption2).foregroundStyle(theme.muted) }
             Spacer(minLength: 2)
-            VStack(alignment: .trailing, spacing: 5) { Text(entry.amount.money).font(.subheadline.monospacedDigit()); if recurring { Text("Recurring").font(.system(size: 10)).foregroundStyle(theme.accent) } }
+            VStack(alignment: .trailing, spacing: 5) { Text(entry.signedMoney).font(.subheadline.monospacedDigit()); if recurring { Text("Recurring").font(.system(size: 10)).foregroundStyle(theme.accent) } }
         }.foregroundStyle(.white)
     }
 }
@@ -197,7 +197,7 @@ struct ActivityView: View {
     var recurring: Set<UUID> { Insights.recurring(store.household.entries) }
     var filtered: [Entry] {
         store.household.entries.filter { entry in
-            (search.isEmpty || entry.merchant.localizedCaseInsensitiveContains(search) || entry.category.rawValue.localizedCaseInsensitiveContains(search)) && (filter == "All" || (filter == "Recurring" && recurring.contains(entry.id)) || (filter == "To review" && Insights.unusual(entry, in: store.household.entries)))
+            (search.isEmpty || entry.merchant.localizedCaseInsensitiveContains(search) || entry.categoryName.localizedCaseInsensitiveContains(search) || entry.category.rawValue.localizedCaseInsensitiveContains(search)) && (filter == "All" || (filter == "Recurring" && recurring.contains(entry.id)) || (filter == "To review" && Insights.unusual(entry, in: store.household.entries)))
         }.sorted { $0.date > $1.date }
     }
     var body: some View {
@@ -216,8 +216,12 @@ struct EntryEditor: View {
     @State var entry: Entry
     var body: some View {
         Form {
-            Section("Transaction") { TextField("Merchant", text: $entry.merchant); TextField("Amount", value: $entry.amount, format: .number).keyboardType(.numbersAndPunctuation); DatePicker("Date", selection: $entry.date, displayedComponents: .date); TextField("Account", text: $entry.account) }
-            Section("Category") { Picker("Category", selection: $entry.category) { ForEach(Category.allCases) { Text($0.rawValue).tag($0) } } }
+            Section("Transaction") { TextField("Merchant", text: $entry.merchant); TextField("Amount", value: $entry.signedAmount, format: .number).keyboardType(.numbersAndPunctuation); DatePicker("Date", selection: $entry.date, displayedComponents: .date); TextField("Account", text: $entry.account) }
+            Section("Category") {
+                Picker("Category", selection: $entry.category) { ForEach(Category.allCases) { Text($0.rawValue).tag($0) } }
+                if entry.category == .other { TextField("Describe Other (e.g. Pets)", text: $entry.otherDescription) }
+            }
+            Section { Text("Money out is negative. Money received is positive.").font(.caption).foregroundStyle(theme.muted) }
             Section { Toggle("Reviewed by me", isOn: $entry.reviewed) } footer: { Text("Unusual charge flags are suggestions based on amount and your imported history. Review the statement to confirm a charge.") }
             Section { Button("Save changes") { entry.modified = Date(); if let index = store.household.entries.firstIndex(where: { $0.id == entry.id }) { store.household.entries[index] = entry; store.save() }; dismiss() }.disabled(entry.merchant.isEmpty || !entry.amount.isFinite) }
         }.scrollContentBackground(.hidden).background(theme.canvas).navigationTitle("Transaction").navigationBarTitleDisplayMode(.inline)
