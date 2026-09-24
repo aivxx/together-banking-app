@@ -13,3 +13,13 @@ xcuserdata/
 *.p8
 *.mobileprovision
 Distribution/output/
+
+# Private household data and local credentials
+household.json
+CloudUploads/
+cloudkit-setup-result.txt
+.env
+.env.*
+!.env.example
+*.pem
+*.key
