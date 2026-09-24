@@ -73,7 +73,9 @@ struct RootView: View {
             }
         }
         .sheet(isPresented: $importing) { ImportView() }
-        .sheet(isPresented: Binding(get: { store.sharing != nil }, set: { if !$0 { store.sharing = nil } })) {
+        .sheet(isPresented: Binding(get: { store.sharing != nil }, set: { if !$0 { store.sharing = nil } }), onDismiss: {
+            Task { await store.refreshFamilyMembers(); await store.sync() }
+        }) {
             if let share = store.sharing, let cloud = store.cloud { SharingView(share: share, container: cloud.container) { store.error = $0 } }
         }
         .alert("A little attention needed", isPresented: Binding(get: { store.error != nil }, set: { if !$0 { store.error = nil } })) { Button("OK") { store.error = nil } } message: { Text(store.error ?? "") }
@@ -119,20 +121,12 @@ struct Dashboard: View {
             HStack {
                 HStack(spacing: 9) { Image(systemName: "circle.hexagongrid.fill").foregroundStyle(theme.accent); Text("together").tracking(-1).font(.system(size: 26, weight: .semibold)) }
                 Spacer()
-                Button { tab = 4 } label: { HStack(spacing: -8) { avatar("Y", theme.accent); avatar("+", theme.secondaryAccent) } }.accessibilityLabel("Our household")
+                Button { tab = 4 } label: { Image(systemName: "person.2.fill").foregroundStyle(theme.accent).frame(width: 44, height: 44).background(theme.panel, in: Circle()) }.accessibilityLabel("Family and household")
                 SettingsButton()
             }
             VStack(alignment: .leading, spacing: 6) {
                 Text("A little clarity.\nA lot more together.").font(.system(size: 30, weight: .semibold, design: .rounded)).tracking(-0.7)
                 Text("Your household, all in one place.").font(.subheadline).foregroundStyle(theme.muted)
-            }
-            if store.demo {
-                HStack(spacing: 8) {
-                    Image(systemName: "sparkles").foregroundStyle(theme.accent)
-                    Text("A preview of life together").font(.caption)
-                    Spacer()
-                    Text("DEMO").font(.system(size: 9, weight: .bold)).tracking(1.2).padding(6).background(Color.white.opacity(0.08), in: Capsule())
-                }.padding(12).background(theme.panel, in: RoundedRectangle(cornerRadius: 12))
             }
             VStack(alignment: .leading, spacing: 18) {
                 HStack { Label("MONTHLY SPENDING", systemImage: "arrow.up.right").font(.system(size: 10, weight: .bold)).tracking(1.6); Spacer(); Text(Date(), format: .dateTime.month(.abbreviated).year()).font(.caption) }.foregroundStyle(theme.canvas.opacity(0.7))
@@ -271,9 +265,8 @@ struct CardEditor: View {
         Form {
             Section("Card details") { TextField("Card nickname", text: $card.name); TextField("Last four digits only", text: $card.lastFour).keyboardType(.numberPad) }
             Section("From your latest statement") { currency("Balance", $card.balance); currency("Credit limit", $card.limit); currency("Minimum payment", $card.minimum); DatePicker("Payment due", selection: $card.due, displayedComponents: .date) }
-            if store.demo { Section { Text("Saving a card starts your real household and removes the preview data.").foregroundStyle(theme.muted) } }
         }.scrollContentBackground(.hidden).background(theme.canvas).navigationTitle("Card details").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Save") { if store.demo { store.startHousehold() }; card.modified = Date(); if let i = store.household.cards.firstIndex(where: { $0.id == card.id }) { store.household.cards[i] = card } else { store.household.cards.append(card) }; store.save(); dismiss() }.disabled(!valid) } }
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Save") { card.modified = Date(); if let i = store.household.cards.firstIndex(where: { $0.id == card.id }) { store.household.cards[i] = card } else { store.household.cards.append(card) }; store.save(); dismiss() }.disabled(!valid) } }
     }
     func currency(_ title: String, _ value: Binding<Double>) -> some View { HStack { Text(title); TextField(title, value: value, format: .number).keyboardType(.decimalPad).multilineTextAlignment(.trailing) } }
 }
@@ -312,9 +305,18 @@ struct HouseholdView: View {
     @EnvironmentObject var store: Store
     var body: some View {
         Page {
-            VStack(alignment: .leading, spacing: 18) { Image(systemName: "person.2.fill").font(.largeTitle).foregroundStyle(theme.accent); SectionHeading(title: "One home. One clear picture.", subtitle: "A private space for you and your partner."); Text(store.demo ? "You’re exploring sample data. Start fresh when you’re ready." : store.cloudStatus).font(.subheadline).foregroundStyle(theme.muted)
-                if store.demo { Button("Start our household") { store.startHousehold() }.buttonStyle(PrimaryButton()) }
-                else { Button { Task { await store.invite() } } label: { Label("Invite or manage partner", systemImage: "person.badge.plus") }.buttonStyle(PrimaryButton()); Button { Task { await store.sync() } } label: { Label(store.syncing ? "Syncing…" : "Sync household", systemImage: "arrow.triangle.2.circlepath") }.disabled(store.syncing || store.cloud == nil) }
+            VStack(alignment: .leading, spacing: 18) {
+                Image(systemName: "person.2.fill").font(.largeTitle).foregroundStyle(theme.accent)
+                SectionHeading(title: "One family. One clear picture.", subtitle: "A private space for the people you choose.")
+                Text(store.cloudStatus).font(.subheadline).foregroundStyle(theme.muted)
+                NavigationLink { FamilyMembersView() } label: {
+                    Label("Family members", systemImage: "person.2.badge.plus")
+                        .font(.subheadline.bold()).frame(maxWidth: .infinity).padding(.vertical, 16)
+                        .foregroundStyle(theme.canvas).background(theme.accent, in: RoundedRectangle(cornerRadius: 15))
+                }
+                Button { Task { await store.sync() } } label: {
+                    Label(store.syncing ? "Syncing…" : "Sync household", systemImage: "arrow.triangle.2.circlepath")
+                }.disabled(store.syncing || store.cloud == nil)
             }.panel()
             VStack(alignment: .leading, spacing: 18) {
                 SectionHeading(title: "A little peace of mind")
@@ -322,7 +324,7 @@ struct HouseholdView: View {
                 if store.lockEnabled { Label("App lock is enabled", systemImage: "faceid"); Button("Lock now") { store.unlocked = false } }
                 else { Button { Task { await store.authenticate(enable: true) } } label: { Label("Enable Face ID / passcode lock", systemImage: "faceid") } }
             }.font(.subheadline).panel()
-            Text(store.cloud == nil ? "iCloud sharing is not configured in this preview build. Your real data stays on this phone. Enable CloudKit and sign the app with your Apple developer account to invite your partner." : "Private iCloud sharing includes your transactions, card details, and uploaded documents. Invite only your partner. Both people can edit. Open the app or pull to refresh Activity to sync.").font(.caption).foregroundStyle(theme.muted)
+            Text(store.cloud == nil ? "iCloud sharing is not enabled in this build. Your information stays on this phone until you use a build with iCloud sharing enabled." : "Everyone you invite can view and edit the shared transactions, card details, and original statements. Invite only the family members you want to give access to. Pull to refresh Activity to sync.").font(.caption).foregroundStyle(theme.muted)
         }.navigationTitle("Our household").toolbar { ToolbarItem(placement: .topBarTrailing) { SettingsButton() } }
     }
 }
@@ -376,7 +378,7 @@ struct SettingsView: View {
                     .accessibilityValue(selection == option ? "Selected" : "Not selected")
                     .accessibilityAddTraits(selection == option ? [.isSelected] : [])
                 }
-                Text("Your theme changes immediately and is saved on this iPhone. Your partner can choose their own.")
+                Text("Your theme changes immediately and is saved on this iPhone. Each family member can choose their own.")
                     .font(.subheadline).foregroundStyle(selection.muted)
             }
             .navigationTitle("Settings")
@@ -386,5 +388,64 @@ struct SettingsView: View {
         .environment(\.appTheme, selection)
         .tint(selection.accent)
         .preferredColorScheme(.dark)
+    }
+}
+
+struct FamilyMembersView: View {
+    @Environment(\.appTheme) private var theme
+    @EnvironmentObject var store: Store
+    var body: some View {
+        Page {
+            VStack(alignment: .leading, spacing: 16) {
+                Image(systemName: "person.3.fill").font(.largeTitle).foregroundStyle(theme.accent)
+                SectionHeading(title: "Banking, together", subtitle: "Invite the family members you want to share with.")
+                Text("People in your Apple Family can join with their own iCloud accounts. Choose each person in Apple’s invitation screen; they’ll need Together installed to accept.")
+                    .font(.subheadline).foregroundStyle(theme.muted)
+                if store.cloud?.participant != true {
+                    Button { Task { await store.invite() } } label: {
+                        Label(store.preparingInvitation ? "Preparing invitation…" : "Add family member", systemImage: "person.badge.plus")
+                    }.buttonStyle(PrimaryButton()).disabled(store.cloud == nil || store.preparingInvitation || store.syncing)
+                }
+                Button { Task { await store.invite() } } label: {
+                    Label(store.cloud?.participant == true ? "Manage my access" : "Manage invitations & access", systemImage: "person.crop.circle.badge.checkmark")
+                }.disabled(store.cloud == nil || store.preparingInvitation || store.syncing)
+            }.panel()
+
+            SectionHeading(title: "People with access")
+            if store.loadingFamily { ProgressView("Checking iCloud…").tint(theme.accent) }
+            if let error = store.familyError {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(error).font(.subheadline).foregroundStyle(theme.muted)
+                    Button("Try again") { Task { await store.refreshFamilyMembers() } }
+                }.panel()
+            } else if store.familyLoaded {
+                ForEach(store.familyMembers) { person in
+                    HStack(spacing: 14) {
+                        Image(systemName: person.isCurrentUser ? "person.crop.circle.fill" : "person.crop.circle")
+                            .font(.title).foregroundStyle(theme.accent)
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(person.name).font(.headline)
+                            Text(person.role + " · " + (person.canEdit ? "Can view & edit" : "Can view"))
+                                .font(.caption).foregroundStyle(theme.muted)
+                        }
+                        Spacer()
+                        Text(person.status).font(.caption.weight(.medium))
+                            .foregroundStyle(person.status == "Invited" ? theme.secondaryAccent : theme.accent)
+                    }.panel()
+                }
+                if store.familyMembers.count == 1 && store.cloud?.participant != true {
+                    Text("Only you have access. Add a family member to start sharing.")
+                        .font(.subheadline).foregroundStyle(theme.muted)
+                }
+            }
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Private by invitation", systemImage: "lock.shield").font(.headline)
+                Text("Apple Family Sharing doesn’t automatically grant access to your banking information. Your invitations share all household transactions, card details, and original statements. You can manage invitations and access above.")
+                    .font(.subheadline).foregroundStyle(theme.muted)
+            }.panel()
+        }
+        .navigationTitle("Family members").navigationBarTitleDisplayMode(.inline)
+        .task { await store.refreshFamilyMembers() }
+        .refreshable { await store.refreshFamilyMembers() }
     }
 }

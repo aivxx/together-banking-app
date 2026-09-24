@@ -82,23 +82,3 @@ enum Insights {
         return entry.amount > max(150, sorted[sorted.count / 2] * 3)
     }
 }
-extension Household {
-    static var demo: Household {
-        let now = Date()
-        func ago(_ days: Int) -> Date { Calendar.current.date(byAdding: .day, value: -days, to: now)! }
-        let entries: [Entry] = [
-            Entry(date: ago(0), merchant: "Whole Foods Market", amount: 86.42, category: .groceries, account: "Sapphire Preferred"),
-            Entry(date: ago(1), merchant: "Blue Bottle Coffee", amount: 12.50, category: .dining, account: "Sapphire Preferred"),
-            Entry(date: ago(1), merchant: "West Elm", amount: 649, category: .shopping, account: "Blue Cash Everyday"),
-            Entry(date: ago(2), merchant: "Netflix", amount: 15.49, category: .entertainment, account: "Sapphire Preferred"),
-            Entry(date: ago(32), merchant: "Netflix", amount: 15.49, category: .entertainment, account: "Sapphire Preferred"),
-            Entry(date: ago(3), merchant: "Trader Joe’s", amount: 73.18, category: .groceries, account: "Blue Cash Everyday"),
-            Entry(date: ago(4), merchant: "Spotify", amount: 16.99, category: .entertainment, account: "Sapphire Preferred"),
-            Entry(date: ago(34), merchant: "Spotify", amount: 16.99, category: .entertainment, account: "Sapphire Preferred"),
-            Entry(date: ago(5), merchant: "Sweetgreen", amount: 32.80, category: .dining, account: "Sapphire Preferred"),
-            Entry(date: ago(6), merchant: "Shell", amount: 58.24, category: .transport, account: "Blue Cash Everyday"),
-            Entry(date: ago(7), merchant: "Pacific Gas & Electric", amount: 142.60, category: .home, account: "Checking"),
-            Entry(date: ago(8), merchant: "Target", amount: 64.28, category: .shopping, account: "Blue Cash Everyday")]
-        return Household(entries: entries, cards: [Card(name: "Sapphire Preferred", lastFour: "4829", balance: 1248.62, limit: 10000, due: Calendar.current.date(byAdding: .day, value: 8, to: now)!, minimum: 40), Card(name: "Blue Cash Everyday", lastFour: "1006", balance: 864.30, limit: 8000, due: Calendar.current.date(byAdding: .day, value: 15, to: now)!, minimum: 35)])
-    }
-}

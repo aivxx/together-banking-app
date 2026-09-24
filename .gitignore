@@ -4,3 +4,12 @@ build/
 *.xcuserstate
 xcuserdata/
 *.xcresult
+
+# Distribution artifacts and signing material
+*.xcarchive/
+*.ipa
+*.dSYM/
+*.p12
+*.p8
+*.mobileprovision
+Distribution/output/

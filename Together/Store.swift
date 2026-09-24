@@ -4,32 +4,34 @@ import CloudKit
 
 @MainActor final class Store: ObservableObject {
     @Published var household = Household()
-    @Published var demo = true
     @Published var unlocked = false
     @Published var error: String?
     @Published var cloudStatus = "Stored on this iPhone"
     @Published var syncing = false
+    @Published var familyMembers: [FamilyMember] = []
+    @Published var loadingFamily = false
+    @Published var familyLoaded = false
+    @Published var familyError: String?
+    @Published var preparingInvitation = false
     @Published var sharing: CKShare?
     @Published var cloud: CloudService?
     @Published var lockEnabled = UserDefaults.standard.bool(forKey: "lockEnabled")
     private var diskURL: URL { FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("household.json") }
     init() {
         if FileManager.default.fileExists(atPath: diskURL.path) {
-            do { household = try JSONDecoder().decode(Household.self, from: Data(contentsOf: diskURL)); demo = false }
-            catch { self.error = "Saved data could not be opened. \(error.localizedDescription)"; demo = false }
-        } else { household = .demo }
+            do { household = try JSONDecoder().decode(Household.self, from: Data(contentsOf: diskURL)) }
+            catch { self.error = "Saved data could not be opened. \(error.localizedDescription)" }
+        }
         unlocked = !lockEnabled
         if Bundle.main.object(forInfoDictionaryKey: "CloudKitEnabled") as? String == "YES" { cloud = CloudService() }
     }
     func save() {
-        guard !demo else { return }
         do {
             try FileManager.default.createDirectory(at: diskURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             let data = try JSONEncoder().encode(household)
             try data.write(to: diskURL, options: [.atomic, .completeFileProtection])
         } catch { self.error = "Could not save your changes: \(error.localizedDescription)" }
     }
-    func startHousehold() { household = Household(); demo = false; save() }
     func authenticate(enable: Bool = false) async {
         let context = LAContext()
         do {
@@ -38,7 +40,6 @@ import CloudKit
         } catch { self.error = error.localizedDescription }
     }
     func add(_ draft: ImportDraft, entries: [Entry], cardBalance: Double? = nil, account: String = "") {
-        if demo { startHousehold() }
         let new = entries.filter { entry in !household.entries.contains { $0.date == entry.date && $0.merchant == entry.merchant && $0.amount == entry.amount && $0.account == entry.account } }
         household.entries += new
         household.statements.append(Statement(name: draft.name, count: new.count, data: draft.data))
@@ -49,7 +50,7 @@ import CloudKit
         save()
     }
     func sync() async {
-        guard let cloud, !demo, !syncing else { return }
+        guard let cloud, !syncing else { return }
         syncing = true; defer { syncing = false }
         do {
             var synced = try await cloud.sync(household)
@@ -67,24 +68,41 @@ import CloudKit
         }
         catch { self.error = error.localizedDescription; cloudStatus = "Sync needs attention" }
     }
+    func refreshFamilyMembers() async {
+        guard !loadingFamily else { return }
+        guard let cloud else { familyError = "iCloud sharing isn’t available in this build."; return }
+        loadingFamily = true; familyError = nil
+        defer { loadingFamily = false }
+        do {
+            familyMembers = try await cloud.members()
+            familyLoaded = true
+        } catch {
+            familyLoaded = false
+            familyMembers = []
+            familyError = error.localizedDescription
+        }
+    }
     func invite() async {
-        guard let cloud else { error = "iCloud sharing needs Apple developer setup. Follow README.md in the Xcode project to enable CloudKit for both phones."; return }
-        if demo { error = "Start your household before inviting your partner."; return }
-        await sync()
-        do { sharing = try await cloud.makeShare() } catch { self.error = error.localizedDescription }
+        guard !preparingInvitation, !syncing else { return }
+        guard let cloud else { error = "iCloud sharing needs Apple developer setup. Follow README.md to enable it."; return }
+        preparingInvitation = true
+        defer { preparingInvitation = false }
+        do {
+            // Establish the private share first. Never upload local records if preparation fails.
+            sharing = try await cloud.makeShare()
+        } catch { self.error = error.localizedDescription }
     }
     func accept(_ metadata: CKShare.Metadata) async {
         guard let cloud else { error = "Enable CloudKit in the signed app to accept this invitation."; return }
         do {
             try await cloud.accept(metadata)
-            if demo { startHousehold() }
             await sync()
         } catch { self.error = error.localizedDescription }
     }
 }
 
 @MainActor final class CloudService {
-    let container = CKContainer(identifier: "iCloud.com.together.household")
+    let container = CKContainer(identifier: "iCloud.com.aivxx.togetherbanking.mmp2r7x6fn")
     var database: CKDatabase { participant ? container.sharedCloudDatabase : container.privateCloudDatabase }
     var participant: Bool { UserDefaults.standard.string(forKey: "shareOwner") != nil }
     var zoneID: CKRecordZone.ID {
@@ -167,5 +185,110 @@ import CloudKit
     enum CloudError: LocalizedError {
         case account, owner
         var errorDescription: String? { self == .account ? "Sign in to iCloud in Settings to sync your household." : "Only the household owner can create invitations." }
+    }
+}
+
+#if DEBUG
+// Explicit developer-only integration check. Uses synthetic data, never household documents.
+extension Store {
+    func verifyCloudSetup() async {
+        let resultURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("cloudkit-setup-result.txt")
+        let result: String
+        if let cloud {
+            do {
+                try await cloud.verifyRoundTrip()
+                if ProcessInfo.processInfo.arguments.contains("--verify-family-sharing") {
+                    let share = try await cloud.makeShare()
+                    guard share.publicPermission == .none else {
+                        throw NSError(domain: "TogetherSharing", code: 2, userInfo: [NSLocalizedDescriptionKey: "Household share must be private."])
+                    }
+                    let members = try await cloud.members()
+                    guard members.contains(where: { $0.isCurrentUser && $0.role == "Owner" }) else {
+                        throw NSError(domain: "TogetherSharing", code: 3, userInfo: [NSLocalizedDescriptionKey: "The signed-in owner was not found in the household share."])
+                    }
+                    result = "PASS: private CloudKit share prepared; signed-in owner loaded from participant list; no invitations sent. Synthetic record round-trip and cleanup passed."
+                } else {
+                    result = "PASS: iCloud account available; private zone and schema created; synthetic record uploaded, downloaded, and deleted."
+                }
+                cloudStatus = "CloudKit connection verified"
+            } catch {
+                result = "FAIL: " + error.localizedDescription
+                self.error = result
+            }
+        } else { result = "FAIL: CloudKit is not enabled in this build." }
+        do {
+            try FileManager.default.createDirectory(at: resultURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data(result.utf8).write(to: resultURL, options: [.atomic, .completeFileProtection])
+        } catch { self.error = "Could not save CloudKit setup result: " + error.localizedDescription }
+    }
+}
+extension CloudService {
+    func verifyRoundTrip() async throws {
+        try await prepare()
+        let id = CKRecord.ID(recordName: "setup-check-" + UUID().uuidString, zoneID: zoneID)
+        let record = CKRecord(recordType: "HouseholdItem", recordID: id)
+        record.parent = CKRecord.Reference(recordID: rootID, action: .none)
+        record["kind"] = "entry"
+        let entry = Entry(date: Date(), merchant: "Temporary CloudKit setup check", amount: 0, category: .other, account: "Setup check")
+        let data = try JSONEncoder().encode(entry)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try data.write(to: url, options: [.atomic, .completeFileProtection])
+        defer { try? FileManager.default.removeItem(at: url) }
+        record["payload"] = CKAsset(fileURL: url)
+        _ = try await database.save(record)
+        do {
+            let fetched = try await database.record(for: id)
+            guard let asset = fetched["payload"] as? CKAsset, let file = asset.fileURL,
+                  try Data(contentsOf: file) == data else {
+                throw NSError(domain: "TogetherSetup", code: 1, userInfo: [NSLocalizedDescriptionKey: "The synthetic record did not round-trip correctly."])
+            }
+        } catch {
+            _ = try? await database.deleteRecord(withID: id)
+            throw error
+        }
+        _ = try await database.deleteRecord(withID: id)
+    }
+}
+#endif
+
+struct FamilyMember: Identifiable {
+    let id: String
+    let name: String
+    let role: String
+    let status: String
+    let canEdit: Bool
+    let isCurrentUser: Bool
+    static let owner = FamilyMember(id: "current-owner", name: "You", role: "Owner", status: "Joined", canEdit: true, isCurrentUser: true)
+}
+
+extension CloudService {
+    func members() async throws -> [FamilyMember] {
+        guard try await container.accountStatus() == .available else { throw CloudError.account }
+        let root: CKRecord
+        do { root = try await database.record(for: rootID) }
+        catch let error as CKError where !participant && (error.code == .unknownItem || error.code == .zoneNotFound) {
+            return [.owner]
+        }
+        guard let reference = root.share else { return [.owner] }
+        guard let share = try await database.record(for: reference.recordID) as? CKShare else {
+            throw NSError(domain: "TogetherSharing", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not load household members."])
+        }
+        return share.participants.enumerated().filter { $0.element.acceptanceStatus != .removed }.map { index, person in
+            let isYou = person == share.currentUserParticipant
+            let isOwner = person.role == .owner
+            let displayName = person.userIdentity.nameComponents.map { PersonNameComponentsFormatter.localizedString(from: $0, style: .default) } ?? ""
+            let name = isYou ? "You" : (!displayName.isEmpty ? displayName : (isOwner ? "Household owner" : "Family member"))
+            let status: String
+            switch person.acceptanceStatus {
+            case .accepted: status = "Joined"
+            case .pending: status = "Invited"
+            case .removed: status = "Removed"
+            default: status = "Status unavailable"
+            }
+            return FamilyMember(id: person.userIdentity.userRecordID?.recordName ?? "participant-\(index)", name: name, role: isOwner ? "Owner" : "Member", status: status, canEdit: isOwner || person.permission == .readWrite, isCurrentUser: isYou)
+        }.sorted { lhs, rhs in
+            if lhs.role != rhs.role { return lhs.role == "Owner" }
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
     }
 }

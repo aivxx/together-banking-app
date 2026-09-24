@@ -2,11 +2,9 @@
 
 **A shared view of your finances, without connecting your bank accounts.**
 
-Together is a native iPhone app for you and your partner to track expenses, organize bank statements, and understand credit card debt. Upload a statement, review the suggested transactions and categories, and keep your household’s information in one place.
+Together is a native iPhone app for you and your family to track expenses, organize bank statements, and understand credit card debt. Upload a statement, review the suggested transactions and categories, and keep your household’s information in one place.
 
-The interface offers **Dark charcoal, Mint, and Lavender** themes. Each partner can choose their own theme on their phone.
-
-> **Current status:** The default build works locally. Private iCloud sharing is implemented but requires the Apple developer and CloudKit configuration below. Two-phone sharing and physical-device Face ID still need verification with your accounts before you rely on the app for financial records.
+The interface offers **Dark charcoal, Mint, and Lavender** themes. Each family member can choose their own theme on their phone.
 
 ## What you can do
 
@@ -16,31 +14,29 @@ The interface offers **Dark charcoal, Mint, and Lavender** themes. Each partner 
 | **Activity** | Search transactions, filter recurring or unusual charges, change categories, correct details, and mark a charge reviewed. |
 | **Cards** | Track each card’s statement balance, credit limit, utilization, minimum payment, and due date. |
 | **Statements** | Upload PDF, CSV, or text statements and view the saved originals. Scanned PDFs use on-device text recognition. |
-| **Household** | Start your household, enable app locking, invite your partner, and sync your shared information. |
+| **Household** | Manage family members, enable app locking, and sync your shared information. |
 | **Settings** | Tap the upper-right gear on any main tab to change your color theme. |
 
 No bank credentials, automatic bank connections, analytics service, or external document-reading service are used. Parsing and category suggestions happen on your iPhone.
 
 ## Run the app
 
-You need a Mac with Xcode and an iOS simulator, or an iPhone running **iOS 18 or later**. This project has been built with Xcode 27 and launched on an iPhone 15 simulator running iOS 18.5.
+You need a Mac with Xcode and an iOS simulator, or an iPhone running **iOS 18 or later**. Use an Xcode version with a compatible iOS SDK and simulator runtime.
 
 1. Open `Together.xcodeproj` from this repository.
 2. Select the **Together** scheme.
 3. Choose an iPhone simulator as the run destination. If you need an iPhone 15, add one through Xcode’s device manager using an installed compatible iOS runtime.
 4. Click **Run** or press **⌘R**. In Xcode 27, the simulator screen appears in [Device Hub](https://developer.apple.com/documentation/xcode/device-hub).
 
-The simulator preview does not require CloudKit setup. Installing on physical phones requires app signing; sharing also requires the CloudKit setup below. No third-party packages are needed.
+CloudKit is controlled by the `CLOUDKIT_ENABLED` build setting; use `NO` for a local-only build. Installing on physical phones requires app signing; sharing also requires the CloudKit setup below. No third-party packages are needed.
 
 ## Use Together
 
-### 1. Explore, then start your household
+### 1. Add your household information
 
-The first launch shows clearly labeled **demo data**. Explore the screens before adding your own records.
+Together starts with an empty household. Add your cards and import your statements to populate Overview and Activity. Existing saved records remain available when you update the app.
 
-Choose **Household → Start our household** to start empty. Saving your first card or importing your first statement also replaces the demo data. Sample entries are not mixed into your real household.
-
-If you will join your partner’s household, accept their invitation before importing your own documents. The current app merges existing local records into the household you join.
+If you will join a family member’s household, accept their invitation before importing your own documents. Existing local records merge into the household you join.
 
 ### 2. Add your credit cards
 
@@ -95,15 +91,15 @@ Tap the upper-right **Settings gear** and choose **Dark charcoal**, **Mint**, or
 
 Open **Household → Enable Face ID / passcode lock** to require device authentication. With locking enabled, Together shows its lock screen when it leaves the foreground. Enable locking separately on each phone and use an iPhone passcode.
 
-## Connect iCloud and share with your partner
+## Connect iCloud and share with your family
 
-Together uses **Apple CloudKit**. The owner’s household is stored in their private database, and their invited partner accesses it through CloudKit’s shared database. The app does not put household records in a public database or require a separate server.
+Together uses **Apple CloudKit**. The owner’s household is stored in their private database, and invited family members access it through CloudKit’s shared database. The app does not put household records in a public database or require a separate server.
 
-The person configuring the app needs an **Apple Developer Program membership** that supports CloudKit. Your partner needs their own Apple Account signed into iCloud and the correctly signed app; they do not need to purchase a developer membership. Apple’s [CloudKit sharing sample](https://github.com/apple/sample-cloudkit-sharing) describes the developer prerequisites and sharing model.
+The person configuring the app needs an **Apple Developer Program membership** that supports CloudKit. Each family member needs their own Apple Account signed into iCloud and the correctly signed app; they do not need to purchase a developer membership. Apple’s [CloudKit sharing sample](https://github.com/apple/sample-cloudkit-sharing) describes the developer prerequisites and sharing model.
 
 ### Step 1: Configure signing and a CloudKit container
 
-Do this once for the app, not separately for each partner:
+Configure signing and CloudKit once for the app. Everyone joining a household must use the same app and container. If using a different developer account, choose your own bundle and container identifiers:
 
 1. In **Xcode → Settings → Accounts**, add your developer Apple Account.
 2. Open the project, select the **Together target**, then **Signing & Capabilities**.
@@ -119,8 +115,8 @@ Use exactly the same container identifier in both places:
 
 | File | Change |
 | --- | --- |
-| `Together/Store.swift` | Replace `iCloud.com.together.household` in `CKContainer(identifier:)`. |
-| `Together/Cloud.entitlements` | Replace `iCloud.com.together.household` in `com.apple.developer.icloud-container-identifiers`. |
+| `Together/Store.swift` | Replace `iCloud.com.aivxx.togetherbanking.mmp2r7x6fn` in `CKContainer(identifier:)`. |
+| `Together/Cloud.entitlements` | Replace `iCloud.com.aivxx.togetherbanking.mmp2r7x6fn` in `com.apple.developer.icloud-container-identifiers`. |
 
 Then set these values in the **Together target → Build Settings**:
 
@@ -131,7 +127,7 @@ Then set these values in the **Together target → Build Settings**:
 
 Apply them to each configuration you install, including Debug for development and Release for distribution. Xcode may create another entitlements file when adding the capability; keep the capability configuration and the file used for signing consistent.
 
-`Together/Info.plist` already maps `CloudKitEnabled` to `$(CLOUDKIT_ENABLED)` and declares `CKSharingSupported`. The default project sets `CLOUDKIT_ENABLED = NO`; changing that flag alone is insufficient without the matching signed entitlements and registered container.
+`Together/Info.plist` already maps `CloudKitEnabled` to `$(CLOUDKIT_ENABLED)` and declares `CKSharingSupported`. This checkout sets `CLOUDKIT_ENABLED = YES`. `CLOUDKIT_ENVIRONMENT` selects Development for Debug and Production for Release, and the entitlements file uses that value. Changing the enabled flag alone is insufficient without matching signed entitlements and a registered container.
 
 CloudKit setup and container inspection are covered in Apple’s [Enabling CloudKit guide](https://developer.apple.com/documentation/cloudkit/enabling-cloudkit-in-your-app).
 
@@ -144,29 +140,30 @@ CloudKit setup and container inspection are covered in Apple’s [Enabling Cloud
 
 Start with non-sensitive sample records while verifying sharing. The simulator alone does not verify physical-device authentication or two-account sharing.
 
-### Step 4: Create one household and invite your partner
+### Step 4: Invite family members
 
-**On the owner’s phone:**
+Apple Family Sharing and Together household sharing are separate. Together cannot automatically read your Apple Family roster or grant it access. Invite each family member explicitly through Apple’s private CloudKit sharing screen. Family members use their own Apple Accounts; you do not need to share a password.
 
-1. Choose **Household → Start our household** if still in demo mode.
-2. Add a test card or import the sample statement.
-3. Choose **Household → Sync household** and confirm that it reports **Synced just now**.
-4. Tap **Invite or manage partner**.
-5. Use Apple’s sharing screen to invite your partner using the identity associated with their Apple Account. The app requests private, read/write sharing and disables public access.
+**On the household owner’s phone:**
 
-**On the partner’s phone:**
+1. Open **Household → Family members**.
+2. Tap **Add family member**.
+3. In Apple’s sharing screen, choose the family member using the email or phone number associated with their Apple Account, then send the private invitation. Repeat for additional family members.
+4. Return to **Family members** to see actual household participants and their **Invited** or **Joined** state. Apple may withhold a participant’s name; use **Manage invitations & access** for Apple’s full sharing controls.
+5. Use **Household → Sync household** to share the latest saved information.
 
-1. Install the configured app before opening the invitation.
-2. Leave the app in demo mode or with an empty real household until the invitation is accepted.
-3. Open and accept the invitation. Together switches to the shared household and requests a sync.
-4. If the app is locked, unlock it and tap **Household → Sync household**.
-5. Confirm the owner’s test records appear.
+**On each invited family member’s phone:**
 
-Both partners can edit the shared information. The share includes **all imported transactions, card details, and original documents** in that household; it is not a per-document sharing system.
+1. Install Together and sign into iCloud with their own Apple Account.
+2. Open and accept the private invitation before importing statements.
+3. Unlock Together if necessary and choose **Household → Sync household**.
+4. Verify that the shared records appear. Members can open **Family members → Manage my access** to view their participation through Apple’s sharing controls.
+
+Invited members can view and edit **all household transactions, card details, and original documents**. Membership in your Apple Family group alone neither grants nor revokes this access. Use the app’s sharing controls to manage it. See Apple’s [CloudKit sharing documentation](https://developer.apple.com/documentation/cloudkit/sharing-cloudkit-data-with-other-icloud-users).
 
 ### Step 5: Check sharing in both directions
 
-Change a test transaction’s category on the partner’s phone and sync it. Sync the owner’s phone and confirm the change appears. Repeat in the other direction before adding real statements.
+Change a test transaction’s category on a family member’s phone and sync it. Sync the owner’s phone and confirm the change appears. Repeat in the other direction before adding real statements.
 
 Changes save locally first. To send and receive updates, use **Household → Sync household** or pull to refresh **Activity**. The app also requests a sync when it becomes active while unlocked. There is no continuous background or real-time sync; after editing, manually sync both phones when you need an immediate shared view.
 
@@ -187,14 +184,14 @@ Install the production build on both phones. Do not mix one development installa
 
 ### Manage access
 
-The owner can return to **Household → Invite or manage partner** to manage participants through Apple’s sharing screen. Removing access or stopping sharing does not erase records or documents already downloaded to another phone. This version does not automatically purge previously downloaded local data after access is revoked.
+The owner can return to **Household → Family members → Manage invitations & access** to manage participants through Apple’s sharing screen. Removing access or stopping sharing does not erase records or documents already downloaded to another phone. This version does not automatically purge previously downloaded local data after access is revoked.
 
 ## Privacy and security boundaries
 
 - **On-device reading:** Statement text extraction, OCR, and categorization run locally. There is no remote AI document-processing service.
 - **Protected local files:** Saved household data and temporary upload files use iOS complete file protection. Physical-device passcodes and the app lock are important parts of the protection.
-- **Private cloud access:** With CloudKit enabled, syncing uploads data to iCloud even before a partner is invited. Private invitations grant the invited participant access to the household; the app does not use CloudKit’s public database.
-- **Account security:** Keep both Apple Accounts protected with two-factor authentication and invite only the intended partner.
+- **Private cloud access:** With CloudKit enabled, syncing uploads data to iCloud even before a family member is invited. Private invitations grant the invited participant access to the household; the app does not use CloudKit’s public database.
+- **Account security:** Keep both Apple Accounts protected with two-factor authentication and invite only the intended family members.
 - **Encryption scope:** Together relies on iOS and CloudKit protections. It does not implement or claim its own end-to-end encryption scheme. App locking does not add a separate encryption layer to shared cloud records.
 - **Original statements:** The original documents can contain full account numbers, addresses, or other sensitive details even though card entry asks only for the last four digits. Consider that before importing and sharing them.
 - **Repository hygiene:** Keep real statements, account data, signing credentials, and exported app data out of GitHub. The included sample CSV contains fictional transactions. The `.gitignore` excludes build outputs and Xcode user state, not arbitrary financial documents you manually add.
@@ -212,7 +209,7 @@ This is an initial implementation, not a security-audited financial service. It 
 | “Sync needs attention” | Read the displayed error, check connectivity and iCloud availability, and retry. After a simultaneous-edit conflict, sync again. |
 | Works from Xcode but fails in TestFlight | Verify the production schema was deployed and both phones run production builds. |
 | No transactions found | Try the example CSV. For your statement, use an unlocked PDF or export CSV with the supported column order. |
-| Duplicate purchases | Use consistent account nicknames and have only one partner import each statement. Concurrent imports are not deduplicated across devices. |
+| Duplicate purchases | Use consistent account nicknames and have only one family member import each statement. Concurrent imports are not deduplicated across devices. |
 
 ## Build and validation
 
@@ -236,7 +233,9 @@ swiftc Together/Models.swift Together/StatementParser.swift Tests/main.swift \
 /private/tmp/together-tests
 ```
 
-The 17 core checks cover CSV parsing, categorization, PDF-style transaction lines, amount signs, invalid inputs, recurring and unusual charges, statement-balance extraction, and serialization. These checks and the successful simulator build do not verify live CloudKit sharing or physical Face ID.
+A developer-only CloudKit integration check is available in Debug builds. Launch with `--verify-cloudkit` after signing into iCloud. It ensures the private zone and root exist, creates a synthetic `HouseholdItem`, verifies its uploaded asset, and removes the test item. The outcome is saved as `Library/Application Support/cloudkit-setup-result.txt` inside the app’s sandbox. The check does not use your household records and is excluded from Release builds. A successful run verifies basic CloudKit access and creates the development schema; it does not verify a family invitation.
+
+The core checks cover CSV parsing, categorization, PDF-style transaction lines, amount signs, invalid inputs, recurring and unusual charges, statement-balance extraction, and serialization. Test live CloudKit invitations with separate Apple Accounts and Face ID on physical devices as well.
 
 ## Repository layout
 

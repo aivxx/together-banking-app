@@ -10,11 +10,21 @@ import UIKit
     var body: some Scene {
         WindowGroup {
             RootView().environmentObject(store).environment(\.appTheme, theme).preferredColorScheme(.dark)
+                .task {
+                    #if DEBUG
+                    if ProcessInfo.processInfo.arguments.contains("--verify-cloudkit") || ProcessInfo.processInfo.arguments.contains("--verify-family-sharing") {
+                        await store.verifyCloudSetup()
+                    }
+                    #endif
+                }
                 .onReceive(NotificationCenter.default.publisher(for: .shareAccepted)) { note in
                     if let metadata = note.object as? CKShare.Metadata { Task { await store.accept(metadata) } }
                 }
                 .onChange(of: phase) { _, value in
                     if value != .active && store.lockEnabled { store.unlocked = false }
+                    #if DEBUG
+                    if ProcessInfo.processInfo.arguments.contains("--verify-cloudkit") || ProcessInfo.processInfo.arguments.contains("--verify-family-sharing") { return }
+                    #endif
                     if value == .active && store.unlocked { Task { await store.sync() } }
                 }
         }

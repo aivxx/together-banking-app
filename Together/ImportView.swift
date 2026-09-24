@@ -30,12 +30,16 @@ struct ImportView: View {
                         ForEach($entries) { $entry in
                             VStack(alignment: .leading, spacing: 8) {
                                 TextField("Merchant", text: $entry.merchant).font(.subheadline.bold())
+                                if StatementParser.isGenericDescription(entry.merchant) {
+                                    Label("Description missing. Check the statement and enter the merchant or payment details.", systemImage: "exclamationmark.triangle")
+                                        .font(.caption).foregroundStyle(.orange)
+                                }
                                 HStack { DatePicker("Date", selection: $entry.date, displayedComponents: .date).labelsHidden(); Spacer(); TextField("Amount", value: $entry.amount, format: .number).keyboardType(.numbersAndPunctuation).multilineTextAlignment(.trailing) }
                                 Picker("Category", selection: $entry.category) { ForEach(Category.allCases) { Text($0.rawValue).tag($0) } }.font(.caption)
                             }.padding(.vertical, 4)
                         }.onDelete { entries.remove(atOffsets: $0) }
                     }
-                    if !store.demo && store.household.cards.contains(where: { $0.name == account }) {
+                    if store.household.cards.contains(where: { $0.name == account }) {
                         Section {
                             Toggle("Update this card’s statement balance", isOn: $updateBalance)
                             if updateBalance { TextField("Statement balance", value: $cardBalance, format: .number).keyboardType(.decimalPad) }
@@ -49,12 +53,11 @@ struct ImportView: View {
                     }
                     Section {
                         TextField("Account or card nickname", text: $account)
-                        if !store.demo && !store.household.cards.isEmpty { Picker("Use a saved card", selection: $account) { Text("Checking").tag("Checking"); ForEach(store.household.cards) { Text($0.name).tag($0.name) } } }
+                        if !store.household.cards.isEmpty { Picker("Use a saved card", selection: $account) { Text("Checking").tag("Checking"); ForEach(store.household.cards) { Text($0.name).tag($0.name) } } }
                         Stepper("Statement year: \(String(year))", value: $year, in: 2000...2100)
                     } header: { Text("Statement details") } footer: { Text("The year is used for dates without a year. For statements spanning December and January, check each date during review.") }
                     Section { Button { picker = true } label: { HStack { Label(busy ? "Reading statement…" : "Choose a document", systemImage: "folder"); if busy { Spacer(); ProgressView() } } }.disabled(busy || account.trimmingCharacters(in: .whitespaces).isEmpty) }
-                    Section { Text("CSV format: Date, Description, Amount. Dates: YYYY-MM-DD or MM/DD/YYYY. Positive amounts are expenses. PDFs need a transaction date, description, and amount on the same line; scanned layouts may need correction. Up to 15 MB and the first 50 PDF pages.").font(.caption).foregroundStyle(theme.muted) }
-                    if store.demo { Section { Text("Your first import replaces the sample data with your real household.").font(.caption).foregroundStyle(theme.accent) } }
+                    Section { Text("CSV format: Date, Description, Amount. Dates: YYYY-MM-DD or MM/DD/YYYY. Positive amounts are expenses. PDF tables and scanned pages are read on this iPhone. Check the detected transactions and amount signs against your statement; some layouts may need correction. Up to 15 MB and the first 50 PDF pages.").font(.caption).foregroundStyle(theme.muted) }
                 }
             }.scrollContentBackground(.hidden).background(theme.canvas).navigationTitle(draft == nil ? "Upload statement" : "Review import").navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
@@ -66,7 +69,7 @@ struct ImportView: View {
                         Task {
                             do {
                                 let parsed = try await Task.detached(priority: .userInitiated) { try StatementParser.parse(url: url, account: selectedAccount, year: selectedYear) }.value
-                                draft = parsed; entries = parsed.entries; cardBalance = parsed.suggestedBalance ?? 0; updateBalance = parsed.suggestedBalance != nil && !store.demo && store.household.cards.contains(where: { $0.name == account })
+                                draft = parsed; entries = parsed.entries; cardBalance = parsed.suggestedBalance ?? 0; updateBalance = parsed.suggestedBalance != nil && store.household.cards.contains(where: { $0.name == account })
                             } catch { self.error = error.localizedDescription }
                             busy = false
                         }
